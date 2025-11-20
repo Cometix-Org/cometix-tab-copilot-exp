@@ -1,0 +1,53 @@
+export enum EndpointType {
+  OFFICIAL = 'official',
+  SELF_HOSTED = 'self-hosted',
+}
+
+export interface EndpointConfig {
+  baseUrl: string;
+  type: EndpointType;
+}
+
+const sharedMappings = {
+    shouldTurnOnCppOnboarding: '/aiserver.v1.AiService/ShouldTurnOnCppOnboarding',
+    streamCpp: '/aiserver.v1.AiService/StreamCpp',
+    cppConfig: '/aiserver.v1.AiService/CppConfig', 
+    cppEditHistoryStatus: '/aiserver.v1.AiService/CppEditHistoryStatus',
+    cppAppend: '/aiserver.v1.AiService/CppAppend',
+    refreshTabContext: '/aiserver.v1.AiService/RefreshTabContext',
+    streamNextCursorPrediction: '/aiserver.v1.AiService/StreamNextCursorPrediction',
+    isCursorPredictionEnabled: '/aiserver.v1.AiService/IsCursorPredictionEnabled',
+    getCppEditClassification: '/aiserver.v1.AiService/GetCppEditClassification',
+    cppEditHistoryAppend: '/aiserver.v1.AiService/CppEditHistoryAppend',
+    availableModels: '/aiserver.v1.CppService/AvailableModels',
+    markCppForEval: '/aiserver.v1.CppService/MarkCppForEval',
+    streamHoldCpp: '/aiserver.v1.CppService/StreamHoldCpp',
+    recordCppFate: '/aiserver.v1.CppService/RecordCppFate',
+    addTabRequestToEval: '/aiserver.v1.CppService/AddTabRequestToEval',
+    uploadFile: '/filesync.v1.FileSyncService/FSUploadFile',
+    syncFile: '/filesync.v1.FileSyncService/FSSyncFile',
+    fsIsEnabledForUser: '/filesync.v1.FileSyncService/FSIsEnabledForUser',
+    fsConfig: '/filesync.v1.FileSyncService/FSConfig',
+    fsGetFileContents: '/filesync.v1.FileSyncService/FSGetFileContents',
+    fsGetMultiFileContents: '/filesync.v1.FileSyncService/FSGetMultiFileContents',
+    cursorPredictionConfig: '/aiserver.v1.CursorPredictionService/CursorPredictionConfig'
+  };
+
+export const ENDPOINT_MAPPINGS = {
+  [EndpointType.OFFICIAL]: sharedMappings,
+  [EndpointType.SELF_HOSTED]: sharedMappings,
+} as const;
+
+export const DEFAULT_ENDPOINTS: Record<EndpointType, string> = {
+  [EndpointType.OFFICIAL]: 'https://api2.cursor.sh',
+  [EndpointType.SELF_HOSTED]: 'http://localhost:4000',
+};
+
+export function getEndpointUrl(
+  endpointType: EndpointType,
+  baseUrl: string,
+  endpoint: keyof typeof ENDPOINT_MAPPINGS[EndpointType.OFFICIAL]
+): string {
+  const path = ENDPOINT_MAPPINGS[endpointType][endpoint];
+  return `${baseUrl.replace(/\/$/, '')}${path}`;
+}

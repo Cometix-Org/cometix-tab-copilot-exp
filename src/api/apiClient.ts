@@ -18,8 +18,8 @@ import type { Client } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-node';
 import { AiService, FileSyncService } from '../rpc/cursor-tab_connect';
 
-type AiPromiseClient = Client<typeof AiService>;
-type FileSyncPromiseClient = Client<typeof FileSyncService>;
+type AiClient = Client<typeof AiService>;
+type FileSyncClient = Client<typeof FileSyncService>;
 
 export interface ApiClientConfig {
   endpointType: EndpointType;
@@ -31,8 +31,8 @@ export interface ApiClientConfig {
 export class ApiClient {
   private config: ApiClientConfig;
   private static channel: vscode.OutputChannel | undefined;
-  private aiClient: AiPromiseClient | null = null;
-  private fileSyncClient: FileSyncPromiseClient | null = null;
+  private aiClient: AiClient | null = null;
+  private fileSyncClient: FileSyncClient | null = null;
 
   constructor(config?: Partial<ApiClientConfig>) {
     this.config = this.loadConfig(config);

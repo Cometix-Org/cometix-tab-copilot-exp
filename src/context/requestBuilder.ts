@@ -18,6 +18,10 @@ export interface RequestContextOptions {
   readonly linterDiagnostics?: vscode.Diagnostic[];
   readonly visibleRanges?: vscode.Range[];
   readonly filesyncUpdates?: FilesyncUpdateWithModelVersion[];
+  readonly relyOnFileSync?: boolean;
+  readonly fileVersion?: number;
+  readonly contentsOverride?: string;
+  readonly lineEnding?: string;
 }
 
 export function buildStreamRequest(
@@ -65,12 +69,19 @@ function buildFileInfo(options: RequestContextOptions): {
     line: options.position.line + 1,
     column: options.position.character + 1,
   });
-
+  const relyOnFileSync = options.relyOnFileSync ?? false;
+  const lineEnding =
+    options.lineEnding ??
+    (options.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n');
+  const contents =
+    options.contentsOverride ?? options.document.getText();
   const currentFile = new CurrentFileInfo({
     relativeWorkspacePath: relativePath,
-    contents: options.document.getText(),
+    contents: relyOnFileSync ? '' : contents,
     cursorPosition,
-    relyOnFilesync: false,
+    relyOnFilesync: relyOnFileSync,
+    fileVersion: options.fileVersion ?? options.document.version,
+    lineEnding,
   });
 
   return {

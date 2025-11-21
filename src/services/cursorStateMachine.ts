@@ -29,11 +29,17 @@ interface FollowupSession {
   readonly queue: RawSuggestion[];
 }
 
+interface BindingEntry {
+  readonly requestId: string;
+  readonly document: vscode.Uri;
+}
+
 const MAX_CONCURRENT_STREAMS = 2;
 
 export class CursorStateMachine implements vscode.Disposable {
   private readonly activeStreams = new Map<string, AbortController>();
-  private readonly bindingCache = new Map<string, { text: string; range: vscode.Range }>();
+  private readonly bindingCache = new Map<string, BindingEntry>();
+  private readonly requestBindings = new Map<string, Set<string>>();
   private readonly followups = new Map<string, FollowupSession>();
   private requestSeed = 0;
   private flags: CursorFeatureFlags;
@@ -70,21 +76,29 @@ export class CursorStateMachine implements vscode.Disposable {
       vscode.window.visibleTextEditors.find((editor) => editor.document === ctx.document)?.visibleRanges ?? [],
     );
 
-    const request = buildStreamRequest(this.tracker, {
-      document: ctx.document,
-      position: ctx.position,
-      linterDiagnostics: diagnostics,
-      visibleRanges,
-      filesyncUpdates: this.fileSync.getUpdatesForRequest(ctx.document),
-    });
-
     const abortController = new AbortController();
     const requestId = `req-${Date.now()}-${this.requestSeed++}`;
     this.registerStream(requestId, abortController);
 
+    const syncPayload = this.fileSync.getSyncPayload(ctx.document);
+
     try {
       const chunks = await withRetry(
-        () => this.consumeStream(request, ctx, abortController),
+        () =>
+          this.consumeStream(
+            buildStreamRequest(this.tracker, {
+              document: ctx.document,
+              position: ctx.position,
+              linterDiagnostics: diagnostics,
+              visibleRanges,
+              filesyncUpdates: syncPayload.updates,
+              relyOnFileSync: syncPayload.relyOnFileSync,
+              fileVersion: ctx.document.version,
+              lineEnding: ctx.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n',
+            }),
+            ctx,
+            abortController
+          ),
         { retries: 2, delayMs: 150 },
       );
       if (chunks.length === 0) {
@@ -95,7 +109,7 @@ export class CursorStateMachine implements vscode.Disposable {
         this.followups.set(requestId, { document: ctx.document.uri, queue: rest });
       }
       if (first.bindingId) {
-        this.bindingCache.set(first.bindingId, { text: first.text, range: first.range });
+        this.rememberBinding(first.bindingId, requestId, ctx.document.uri);
       }
       return { ...first, requestId };
     } finally {
@@ -103,16 +117,29 @@ export class CursorStateMachine implements vscode.Disposable {
     }
   }
 
-  async handleAccept(editor: vscode.TextEditor, requestId: string): Promise<void> {
-    this.lastAcceptedRequestId = requestId;
-    const session = this.followups.get(requestId);
+  async handleAccept(editor: vscode.TextEditor, requestId?: string, bindingId?: string): Promise<void> {
+    const resolvedRequestId = this.resolveRequestId(bindingId, requestId, editor.document.uri);
+    if (!resolvedRequestId) {
+      return;
+    }
+    this.lastAcceptedRequestId = resolvedRequestId;
+    const session = this.followups.get(resolvedRequestId);
     if (session && !session.queue.length) {
-      this.followups.delete(requestId);
+      this.followups.delete(resolvedRequestId);
+      if (bindingId) {
+        this.bindingCache.delete(bindingId);
+      }
+      this.forgetBindingsForRequest(resolvedRequestId);
     }
   }
 
-  async applyNextEdit(editor: vscode.TextEditor, requestId?: string): Promise<boolean> {
-    const targetRequestId = requestId ?? this.lastAcceptedRequestId;
+  async applyNextEdit(
+    editor: vscode.TextEditor,
+    requestId?: string,
+    bindingId?: string
+  ): Promise<boolean> {
+    const candidateRequestId = requestId ?? this.lastAcceptedRequestId;
+    const targetRequestId = this.resolveRequestId(bindingId, candidateRequestId, editor.document.uri);
     if (!targetRequestId) {
       return false;
     }
@@ -129,6 +156,10 @@ export class CursorStateMachine implements vscode.Disposable {
     await editor.edit((builder) => builder.replace(targetRange, next.text));
     if (!session.queue.length) {
       this.followups.delete(targetRequestId);
+      if (bindingId) {
+        this.bindingCache.delete(bindingId);
+      }
+      this.forgetBindingsForRequest(targetRequestId);
     }
     return true;
   }
@@ -252,5 +283,36 @@ export class CursorStateMachine implements vscode.Disposable {
       return this.toVsRange(document, suggestion.lineRange);
     }
     return suggestion.range;
+  }
+
+  private rememberBinding(bindingId: string, requestId: string, document: vscode.Uri): void {
+    this.bindingCache.set(bindingId, { requestId, document });
+    const bindings = this.requestBindings.get(requestId) ?? new Set<string>();
+    bindings.add(bindingId);
+    this.requestBindings.set(requestId, bindings);
+  }
+
+  private resolveRequestId(
+    bindingId?: string,
+    fallback?: string,
+    document?: vscode.Uri
+  ): string | undefined {
+    if (bindingId) {
+      const entry = this.bindingCache.get(bindingId);
+      if (entry && (!document || entry.document.toString() === document.toString())) {
+        return entry.requestId;
+      }
+    }
+    return fallback;
+  }
+
+  private forgetBindingsForRequest(requestId: string): void {
+    const bindings = this.requestBindings.get(requestId);
+    if (bindings) {
+      for (const bindingId of bindings) {
+        this.bindingCache.delete(bindingId);
+      }
+      this.requestBindings.delete(requestId);
+    }
   }
 }

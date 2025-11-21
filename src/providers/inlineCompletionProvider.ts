@@ -20,7 +20,7 @@ export class CursorInlineCompletionProvider implements vscode.InlineCompletionIt
     item.command = {
       title: 'Cursor Tab Accept',
       command: 'cometix-tab.inlineAccept',
-      arguments: [suggestion.requestId],
+      arguments: [suggestion.requestId, suggestion.bindingId],
     };
     return [item];
   }

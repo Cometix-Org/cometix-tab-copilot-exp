@@ -5,6 +5,7 @@ import { ConfigService } from '../services/configService';
 import { Logger } from '../services/logger';
 import { buildPredictionRequest } from '../context/requestBuilder';
 import { StreamNextCursorPredictionResponse } from '../rpc/cursor-tab_pb';
+import { FileSyncCoordinator } from '../services/fileSyncCoordinator';
 
 export class CursorPredictionController implements vscode.Disposable {
   private readonly decoration = vscode.window.createTextEditorDecorationType({
@@ -20,7 +21,8 @@ export class CursorPredictionController implements vscode.Disposable {
     private readonly tracker: DocumentTracker,
     private readonly rpc: RpcClient,
     private readonly config: ConfigService,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly fileSync: FileSyncCoordinator
   ) {
     this.disposables.push(
       vscode.window.onDidChangeTextEditorSelection((event) => this.schedulePrediction(event.textEditor)),
@@ -53,10 +55,16 @@ export class CursorPredictionController implements vscode.Disposable {
     }
     const document = editor.document;
     const position = editor.selection.active;
+    await this.fileSync.prepareDocument(document);
+    const syncPayload = this.fileSync.getSyncPayload(document);
     const request = buildPredictionRequest(this.tracker, {
       document,
       position,
       visibleRanges: Array.from(editor.visibleRanges),
+      filesyncUpdates: syncPayload.updates,
+      relyOnFileSync: syncPayload.relyOnFileSync,
+      fileVersion: document.version,
+      lineEnding: document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n',
     });
 
     this.activeAbort?.abort();

@@ -40,12 +40,13 @@ export function activate(context: vscode.ExtensionContext) {
 	const tracker = container.resolve<DocumentTracker>('tracker');
 	const rpcClient = container.resolve<RpcClient>('rpcClient');
 	const config = container.resolve<ConfigService>('config');
+	const fileSync = container.resolve<FileSyncCoordinator>('fileSync');
 
 	registerInlineCompletionProvider(stateMachine, context.subscriptions);
 	registerInlineAcceptCommand(stateMachine, logger, context.subscriptions);
 	registerNextEditCommand(stateMachine, logger, context.subscriptions);
 
-	const predictionController = new CursorPredictionController(tracker, rpcClient, config, logger);
+	const predictionController = new CursorPredictionController(tracker, rpcClient, config, logger, fileSync);
 	context.subscriptions.push(predictionController);
 
 	logger.info('Cometix Tab extension activated');

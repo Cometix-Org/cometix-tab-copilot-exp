@@ -7,19 +7,19 @@ export function registerInlineAcceptCommand(
   logger: Logger,
   subscriptions: vscode.Disposable[],
 ): void {
-  const command = vscode.commands.registerCommand('cometix-tab.inlineAccept', async (requestId?: string) => {
-    if (!requestId) {
-      return;
+  const command = vscode.commands.registerCommand(
+    'cometix-tab.inlineAccept',
+    async (requestId?: string, bindingId?: string) => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        return;
+      }
+      try {
+        await stateMachine.handleAccept(editor, requestId, bindingId);
+      } catch (error) {
+        logger.error('Failed to handle inline accept', error);
+      }
     }
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-      return;
-    }
-    try {
-      await stateMachine.handleAccept(editor, requestId);
-    } catch (error) {
-      logger.error('Failed to handle inline accept', error);
-    }
-  });
+  );
   subscriptions.push(command);
 }

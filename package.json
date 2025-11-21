@@ -5,7 +5,7 @@
   "publisher": "Haleclipse",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.106.1"
+    "vscode": "^1.103.1"
   },
   "categories": [
     "Other"

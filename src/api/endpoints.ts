@@ -1,13 +1,3 @@
-export enum EndpointType {
-  OFFICIAL = 'official',
-  SELF_HOSTED = 'self-hosted',
-}
-
-export interface EndpointConfig {
-  baseUrl: string;
-  type: EndpointType;
-}
-
 const sharedMappings = {
     shouldTurnOnCppOnboarding: '/aiserver.v1.AiService/ShouldTurnOnCppOnboarding',
     streamCpp: '/aiserver.v1.AiService/StreamCpp',
@@ -33,21 +23,13 @@ const sharedMappings = {
     cursorPredictionConfig: '/aiserver.v1.CursorPredictionService/CursorPredictionConfig'
   };
 
-export const ENDPOINT_MAPPINGS = {
-  [EndpointType.OFFICIAL]: sharedMappings,
-  [EndpointType.SELF_HOSTED]: sharedMappings,
-} as const;
+export const ENDPOINT_MAPPINGS = sharedMappings;
 
-export const DEFAULT_ENDPOINTS: Record<EndpointType, string> = {
-  [EndpointType.OFFICIAL]: 'https://api2.cursor.sh',
-  [EndpointType.SELF_HOSTED]: 'http://localhost:4000',
-};
+export type EndpointKey = keyof typeof ENDPOINT_MAPPINGS;
 
-export function getEndpointUrl(
-  endpointType: EndpointType,
-  baseUrl: string,
-  endpoint: keyof typeof ENDPOINT_MAPPINGS[EndpointType.OFFICIAL]
-): string {
-  const path = ENDPOINT_MAPPINGS[endpointType][endpoint];
+export const DEFAULT_BASE_URL = 'https://api2.cursor.sh';
+
+export function getEndpointUrl(baseUrl: string, endpoint: EndpointKey): string {
+  const path = ENDPOINT_MAPPINGS[endpoint];
   return `${baseUrl.replace(/\/$/, '')}${path}`;
 }

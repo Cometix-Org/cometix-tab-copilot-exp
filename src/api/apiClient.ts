@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { getOrGenerateClientKey } from '../utils/checksum';
-import { DEFAULT_ENDPOINTS, ENDPOINT_MAPPINGS, EndpointType, getEndpointUrl } from './endpoints';
+import { DEFAULT_BASE_URL, EndpointKey, getEndpointUrl } from './endpoints';
 import { 
   StreamCppRequest, 
   StreamCppResponse,
@@ -23,7 +23,6 @@ type AiClient = Client<typeof AiService>;
 type FileSyncClient = Client<typeof FileSyncService>;
 
 export interface ApiClientConfig {
-  endpointType: EndpointType;
   baseUrl?: string;
   authToken: string;
   clientKey: string;
@@ -48,28 +47,15 @@ export class ApiClient {
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
     const vscodeConfig = vscode.workspace.getConfiguration('cometixTab');
 
-    const endpointType = (override?.endpointType || vscodeConfig.get<string>('endpointType') || 'official') as EndpointType;
     const customBaseUrl = override?.baseUrl || vscodeConfig.get<string>('serverUrl');
 
-    // 智能URL检测：如果用户没有设置自定义URL，或者当前URL与端点类型不匹配，则使用默认URL
+    // 智能URL检测：如果用户没有设置自定义URL，或者当前URL不是官方域名，使用默认官方URL
     let baseUrl: string;
     if (!customBaseUrl || customBaseUrl.trim() === '') {
-      // 用户没有设置自定义URL，使用默认值
-      baseUrl = DEFAULT_ENDPOINTS[endpointType];
+      baseUrl = DEFAULT_BASE_URL;
     } else {
-      // 检查当前URL是否与端点类型匹配
       const isOfficialUrl = customBaseUrl.includes('api2.cursor.sh') || customBaseUrl.includes('cursor.sh');
-
-      if (endpointType === EndpointType.OFFICIAL && !isOfficialUrl) {
-        // 选择了官方端点但URL不是官方的，使用默认官方URL
-        baseUrl = DEFAULT_ENDPOINTS[EndpointType.OFFICIAL];
-      } else if (endpointType === EndpointType.SELF_HOSTED && isOfficialUrl) {
-        // 选择了自部署端点但URL是官方的，使用默认自部署URL
-        baseUrl = DEFAULT_ENDPOINTS[EndpointType.SELF_HOSTED];
-      } else {
-        // URL与端点类型匹配，使用用户设置的URL
-        baseUrl = customBaseUrl;
-      }
+      baseUrl = isOfficialUrl ? customBaseUrl : DEFAULT_BASE_URL;
     }
 
     // 如果没有客户端密钥，自动生成一个
@@ -81,7 +67,6 @@ export class ApiClient {
     }
 
     return {
-      endpointType,
       baseUrl,
       authToken: override?.authToken || vscodeConfig.get<string>('authToken') || '',
       clientKey
@@ -89,58 +74,51 @@ export class ApiClient {
   }
 
   private initializeClients() {
-    if (this.config.endpointType === EndpointType.OFFICIAL) {
-      // 使用 Connect RPC 客户端（官方端点）
-      const transport = createConnectTransport({
-        baseUrl: this.config.baseUrl!,
-        httpVersion: '1.1',
-        interceptors: [
-          (next: any) => async (req: any) => {
-            // 添加认证头部
-            if (this.config.authToken) {
-              req.header.set('Authorization', `Bearer ${this.config.authToken}`);
-            }
-            const checksum = buildCursorChecksum(vscode.env.machineId);
-            if (checksum) {
-              req.header.set('x-cursor-checksum', checksum);
-            }
-            if (this.config.clientKey) {
-              req.header.set('x-client-key', this.config.clientKey);
-            }
-            req.header.set('x-cursor-client-version', '1.5.5');
-            req.header.set('x-fs-client-key', this.fsClientKey);
-            
-            // 添加追踪头部
-            const rid = cryptoRandomUUIDSafe();
-            req.header.set('x-request-id', rid);
-            req.header.set('x-amzn-trace-id', `Root=${rid}`);
-            try {
-              const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-              req.header.set('x-cursor-timezone', tz);
-            } catch { }
-
-            // 日志记录
-            await this.logConnectRequest(req);
-            
-            try {
-              const result = await next(req);
-              await this.logConnectResponse(req, result);
-              return result;
-            } catch (error) {
-              await this.logConnectError(req, error);
-              throw error;
-            }
+    const transport = createConnectTransport({
+      baseUrl: this.config.baseUrl!,
+      httpVersion: '1.1',
+      interceptors: [
+        (next: any) => async (req: any) => {
+          // 添加认证头部
+          if (this.config.authToken) {
+            req.header.set('Authorization', `Bearer ${this.config.authToken}`);
           }
-        ]
-      });
+          const checksum = buildCursorChecksum(vscode.env.machineId);
+          if (checksum) {
+            req.header.set('x-cursor-checksum', checksum);
+          }
+          if (this.config.clientKey) {
+            req.header.set('x-client-key', this.config.clientKey);
+          }
+          req.header.set('x-cursor-client-version', '1.5.5');
+          req.header.set('x-fs-client-key', this.fsClientKey);
+          
+          // 添加追踪头部
+          const rid = cryptoRandomUUIDSafe();
+          req.header.set('x-request-id', rid);
+          req.header.set('x-amzn-trace-id', `Root=${rid}`);
+          try {
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            req.header.set('x-cursor-timezone', tz);
+          } catch { }
 
-      this.aiClient = createClient(AiService, transport);
-      this.fileSyncClient = createClient(FileSyncService, transport);
-    } else {
-      // 自部署端点暂时保留原有的 fetch 实现
-      this.aiClient = null;
-      this.fileSyncClient = null;
-    }
+          // 日志记录
+          await this.logConnectRequest(req);
+          
+          try {
+            const result = await next(req);
+            await this.logConnectResponse(req, result);
+            return result;
+          } catch (error) {
+            await this.logConnectError(req, error);
+            throw error;
+          }
+        }
+      ]
+    });
+
+    this.aiClient = createClient(AiService, transport);
+    this.fileSyncClient = createClient(FileSyncService, transport);
   }
 
   updateConfig(newConfig: Partial<ApiClientConfig>) {
@@ -148,8 +126,8 @@ export class ApiClient {
     this.initializeClients();
   }
 
-  private getUrl(endpoint: keyof typeof ENDPOINT_MAPPINGS[EndpointType.OFFICIAL]): string {
-    return getEndpointUrl(this.config.endpointType, this.config.baseUrl!, endpoint);
+  private getUrl(endpoint: EndpointKey): string {
+    return getEndpointUrl(this.config.baseUrl!, endpoint);
   }
 
   private getHeaders(contentType = 'application/json'): Record<string, string> {
@@ -162,24 +140,15 @@ export class ApiClient {
       headers['Authorization'] = `Bearer ${this.config.authToken}`;
     }
 
-    // 根据端点类型使用不同的认证头部
-    if (this.config.endpointType === EndpointType.OFFICIAL) {
-      // 官方端点使用 x-cursor-checksum 和版本号
-      const checksum = buildCursorChecksum(vscode.env.machineId);
-      if (checksum) {
-        headers['x-cursor-checksum'] = checksum;
-      }
-      if (this.config.clientKey) {
-        headers['x-client-key'] = this.config.clientKey;
-      }
-      headers['x-cursor-client-version'] = '1.5.5';
-      headers['x-fs-client-key'] = this.fsClientKey;
-    } else {
-      // 自部署端点使用 x-client-key
-      if (this.config.clientKey) {
-        headers['x-client-key'] = this.config.clientKey;
-      }
+    const checksum = buildCursorChecksum(vscode.env.machineId);
+    if (checksum) {
+      headers['x-cursor-checksum'] = checksum;
     }
+    if (this.config.clientKey) {
+      headers['x-client-key'] = this.config.clientKey;
+    }
+    headers['x-cursor-client-version'] = '1.5.5';
+    headers['x-fs-client-key'] = this.fsClientKey;
 
     // Common tracing / ghost headers
     const rid = cryptoRandomUUIDSafe();
@@ -367,234 +336,82 @@ export class ApiClient {
   }
 
   async streamCpp(request: StreamCppRequest, abortController?: AbortController): Promise<AsyncIterable<StreamCppResponse>> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.aiClient) {
-      const stream = this.aiClient.streamCpp(request, { signal: abortController?.signal }) as unknown as AsyncIterable<StreamCppResponse>;
-      return stream;
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('streamCpp');
-      const headers = this.getHeaders('application/json');
-      await this.logRequest('streamCpp', url, headers, serializeMessage(request));
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: serializeMessage(request),
-        signal: abortController?.signal
-      });
-
-      if (!response.ok) {
-        await this.logResponse('streamCpp', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      // 返回 async iterable 包装的 ReadableStream
-      const stream = response.body;
-      if (!stream) {
-        throw new Error('No response body received');
-      }
-
-      return this.streamToAsyncIterable(stream, (json) => StreamCppResponse.fromJson(json as any));
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
     }
+
+    const stream = this.aiClient.streamCpp(request, { signal: abortController?.signal }) as unknown as AsyncIterable<StreamCppResponse>;
+    return stream;
   }
 
   async streamNextCursorPrediction(
     request: StreamNextCursorPredictionRequest,
     abortController?: AbortController
   ): Promise<AsyncIterable<StreamNextCursorPredictionResponse>> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-
-    if (isOfficial && this.aiClient) {
-      const stream = this.aiClient.streamNextCursorPrediction(request, { signal: abortController?.signal }) as unknown as AsyncIterable<StreamNextCursorPredictionResponse>;
-      return stream;
-    } else {
-      const url = this.getUrl('streamNextCursorPrediction');
-      const headers = this.getHeaders('application/json');
-      await this.logRequest('streamNextCursorPrediction', url, headers, serializeMessage(request));
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: serializeMessage(request),
-        signal: abortController?.signal,
-      });
-
-      if (!response.ok) {
-        await this.logResponse('streamNextCursorPrediction', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const stream = response.body;
-      if (!stream) {
-        throw new Error('No response body received');
-      }
-
-      return this.streamToAsyncIterable(stream, (json) => StreamNextCursorPredictionResponse.fromJson(json as any));
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
     }
+
+    const stream = this.aiClient.streamNextCursorPrediction(request, { signal: abortController?.signal }) as unknown as AsyncIterable<StreamNextCursorPredictionResponse>;
+    return stream;
   }
 
   async refreshTabContext(request: RefreshTabContextRequest): Promise<RefreshTabContextResponse> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.aiClient) {
-      const response = (await this.aiClient.refreshTabContext(request)) as unknown as RefreshTabContextResponse;
-      return response;
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('refreshTabContext');
-      const headers = this.getHeaders('application/json');
-      await this.logRequest('refreshTabContext', url, headers, serializeMessage(request));
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: serializeMessage(request)
-      });
-
-      if (!response.ok) {
-        await this.logResponse('refreshTabContext', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json() as any;
-      await this.logResponse('refreshTabContext', url, response.status, response.headers, jsonResponse, false);
-      return RefreshTabContextResponse.fromJson(jsonResponse);
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
     }
+
+    const response = (await this.aiClient.refreshTabContext(request)) as unknown as RefreshTabContextResponse;
+    return response;
   }
 
   async getCppConfig(): Promise<any> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.aiClient) {
-      const { CppConfigRequest } = await import('../rpc/cursor-tab_pb.js');
-      const request = new CppConfigRequest({});
-      return await this.aiClient.cppConfig(request);
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('cppConfig');
-      const headers = this.getHeaders();
-      await this.logRequest('getCppConfig', url, headers, undefined);
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers
-      });
-
-      if (!response.ok) {
-        await this.logResponse('getCppConfig', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json();
-      await this.logResponse('getCppConfig', url, response.status, response.headers, jsonResponse, false);
-      return jsonResponse;
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
     }
+
+    const { CppConfigRequest } = await import('../rpc/cursor-tab_pb.js');
+    const request = new CppConfigRequest({});
+    return await this.aiClient.cppConfig(request);
   }
 
   async getAvailableModels(): Promise<any> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.fileSyncClient) {
-      // 注意：AvailableModels 在 CppService 中，不是 AiService
-      // 但我们先用 fileSyncClient 测试，如果需要可以添加 cppServiceClient
-      const url = this.getUrl('availableModels');
-      const headers = this.getHeaders();
-      await this.logRequest('getAvailableModels', url, headers, undefined);
+    const url = this.getUrl('availableModels');
+    const headers = this.getHeaders();
+    await this.logRequest('getAvailableModels', url, headers, undefined);
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: new Uint8Array()
-      });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: new Uint8Array()
+    });
 
-      if (!response.ok) {
-        await this.logResponse('getAvailableModels', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json();
-      await this.logResponse('getAvailableModels', url, response.status, response.headers, jsonResponse, false);
-      return jsonResponse;
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('availableModels');
-      const headers = this.getHeaders();
-      await this.logRequest('getAvailableModels', url, headers, undefined);
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers
-      });
-
-      if (!response.ok) {
-        await this.logResponse('getAvailableModels', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json();
-      await this.logResponse('getAvailableModels', url, response.status, response.headers, jsonResponse, false);
-      return jsonResponse;
+    if (!response.ok) {
+      await this.logResponse('getAvailableModels', url, response.status, response.headers, null, false);
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
+
+    const jsonResponse = await response.json();
+    await this.logResponse('getAvailableModels', url, response.status, response.headers, jsonResponse, false);
+    return jsonResponse;
   }
 
   async uploadFile(request: FSUploadFileRequest): Promise<FSUploadFileResponse> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.fileSyncClient) {
-      const response = (await this.fileSyncClient.fSUploadFile(request)) as unknown as FSUploadFileResponse;
-      return response;
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('uploadFile');
-      const headers = this.getHeaders('application/json');
-      await this.logRequest('uploadFile', url, headers, serializeMessage(request));
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: serializeMessage(request)
-      });
-
-      if (!response.ok) {
-        await this.logResponse('uploadFile', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json() as any;
-      await this.logResponse('uploadFile', url, response.status, response.headers, jsonResponse, false);
-      return FSUploadFileResponse.fromJson(jsonResponse);
+    if (!this.fileSyncClient) {
+      throw new Error('File sync client is not initialized');
     }
+
+    const response = (await this.fileSyncClient.fSUploadFile(request)) as unknown as FSUploadFileResponse;
+    return response;
   }
 
   async syncFile(request: FSSyncFileRequest): Promise<FSSyncFileResponse> {
-    const isOfficial = this.config.endpointType === EndpointType.OFFICIAL;
-    
-    if (isOfficial && this.fileSyncClient) {
-      const response = (await this.fileSyncClient.fSSyncFile(request)) as unknown as FSSyncFileResponse;
-      return response;
-    } else {
-      // 自部署端点使用原有的 fetch 实现
-      const url = this.getUrl('syncFile');
-      const headers = this.getHeaders('application/json');
-      await this.logRequest('syncFile', url, headers, serializeMessage(request));
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: serializeMessage(request)
-      });
-
-      if (!response.ok) {
-        await this.logResponse('syncFile', url, response.status, response.headers, null, false);
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const jsonResponse = await response.json() as any;
-      await this.logResponse('syncFile', url, response.status, response.headers, jsonResponse, false);
-      return FSSyncFileResponse.fromJson(jsonResponse);
+    if (!this.fileSyncClient) {
+      throw new Error('File sync client is not initialized');
     }
+
+    const response = (await this.fileSyncClient.fSSyncFile(request)) as unknown as FSSyncFileResponse;
+    return response;
   }
 
   // Helper: 将 ReadableStream 转换为 AsyncIterable
@@ -726,10 +543,9 @@ export class ApiClient {
     }
   }
 
-  getEndpointInfo(): { type: EndpointType; baseUrl: string; isDefaultUrl: boolean } {
-    const isDefaultUrl = this.config.baseUrl === DEFAULT_ENDPOINTS[this.config.endpointType];
+  getEndpointInfo(): { baseUrl: string; isDefaultUrl: boolean } {
+    const isDefaultUrl = this.config.baseUrl === DEFAULT_BASE_URL;
     return {
-      type: this.config.endpointType,
       baseUrl: this.config.baseUrl!,
       isDefaultUrl
     };
@@ -750,15 +566,12 @@ export class ApiClient {
       issues.push('Client key is not set');
     }
 
-    // 检查URL与端点类型的匹配性
     if (this.config.baseUrl) {
       const isOfficialUrl = this.config.baseUrl.includes('api2.cursor.sh') ||
         this.config.baseUrl.includes('cursor.sh');
 
-      if (this.config.endpointType === EndpointType.OFFICIAL && !isOfficialUrl) {
-        issues.push('Selected official endpoint but URL does not appear to be official Cursor API');
-      } else if (this.config.endpointType === EndpointType.SELF_HOSTED && isOfficialUrl) {
-        issues.push('Selected self-hosted endpoint but URL appears to be official Cursor API');
+      if (!isOfficialUrl) {
+        issues.push('Endpoint URL does not appear to be the official Cursor API');
       }
     }
 

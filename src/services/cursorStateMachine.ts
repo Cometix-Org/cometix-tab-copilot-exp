@@ -1,17 +1,23 @@
 import * as vscode from 'vscode';
 import { LineRange } from '../rpc/cursor-tab_pb';
 import { withRetry } from './retry';
-import { RpcClient } from './rpcClient';
-import { DocumentTracker } from './documentTracker';
-import { Logger } from './logger';
-import { ConfigService, CursorFeatureFlags } from './configService';
-import { FileSyncCoordinator } from './fileSyncCoordinator';
 import { buildStreamRequest } from '../context/requestBuilder';
+import {
+  IDocumentTracker,
+  IRpcClient,
+  ILogger,
+  IConfigService,
+  IFileSyncCoordinator,
+  ICursorPredictionController,
+} from '../context/contracts';
+import { CursorFeatureFlags } from '../context/types';
+import { CursorPredictionController } from '../controllers/cursorPredictionController';
 
 export interface SuggestionContext {
   readonly document: vscode.TextDocument;
   readonly position: vscode.Position;
   readonly token: vscode.CancellationToken;
+  readonly requestUuid?: string;
 }
 
 export interface SuggestionResult {
@@ -20,6 +26,7 @@ export interface SuggestionResult {
   readonly requestId: string;
   readonly bindingId?: string;
   readonly lineRange?: LineRange;
+  readonly displayLocation?: vscode.InlineCompletionDisplayLocation;
 }
 
 interface RawSuggestion extends Omit<SuggestionResult, 'requestId'> {}
@@ -46,11 +53,12 @@ export class CursorStateMachine implements vscode.Disposable {
   private lastAcceptedRequestId: string | undefined;
 
   constructor(
-    private readonly tracker: DocumentTracker,
-    private readonly rpc: RpcClient,
-    private readonly logger: Logger,
-    private readonly config: ConfigService,
-    private readonly fileSync: FileSyncCoordinator,
+    private readonly tracker: IDocumentTracker,
+    private readonly rpc: IRpcClient,
+    private readonly logger: ILogger,
+    private readonly config: IConfigService,
+    private readonly fileSync: IFileSyncCoordinator,
+    private readonly cursorPrediction: ICursorPredictionController,
   ) {
     this.flags = config.flags;
     config.onDidChange((next) => (this.flags = next));
@@ -69,15 +77,13 @@ export class CursorStateMachine implements vscode.Disposable {
       return null;
     }
 
-    await this.fileSync.prepareDocument(ctx.document);
-
     const diagnostics = vscode.languages.getDiagnostics(ctx.document.uri);
     const visibleRanges = Array.from(
       vscode.window.visibleTextEditors.find((editor) => editor.document === ctx.document)?.visibleRanges ?? [],
     );
 
     const abortController = new AbortController();
-    const requestId = `req-${Date.now()}-${this.requestSeed++}`;
+    const requestId = ctx.requestUuid ?? `req-${Date.now()}-${this.requestSeed++}`;
     this.registerStream(requestId, abortController);
 
     const syncPayload = this.fileSync.getSyncPayload(ctx.document);
@@ -123,14 +129,43 @@ export class CursorStateMachine implements vscode.Disposable {
       return;
     }
     this.lastAcceptedRequestId = resolvedRequestId;
-    const session = this.followups.get(resolvedRequestId);
-    if (session && !session.queue.length) {
-      this.followups.delete(resolvedRequestId);
-      if (bindingId) {
-        this.bindingCache.delete(bindingId);
-      }
-      this.forgetBindingsForRequest(resolvedRequestId);
+    void this.cursorPrediction.handleSuggestionAccepted(editor);
+    this.cleanupIfFinished(resolvedRequestId, bindingId);
+  }
+
+  async handlePartialAccept(
+    editor: vscode.TextEditor,
+    requestId?: string,
+    bindingId?: string,
+    _info?: vscode.PartialAcceptInfo
+  ): Promise<void> {
+    const resolvedRequestId = this.resolveRequestId(bindingId, requestId, editor.document.uri);
+    if (!resolvedRequestId) {
+      return;
     }
+    this.lastAcceptedRequestId = resolvedRequestId;
+  }
+
+  handleCompletionEnd(
+    requestId: string,
+    bindingId: string | undefined,
+    reason: vscode.InlineCompletionEndOfLifeReason
+  ): void {
+    if (reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Rejected || reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Ignored) {
+      this.cleanupRequest(requestId, bindingId);
+    }
+  }
+
+  handleListEnd(
+    requestId: string,
+    bindingId: string | undefined,
+    _reason: vscode.InlineCompletionsDisposeReason
+  ): void {
+    this.cleanupRequest(requestId, bindingId);
+  }
+
+  handleShown(_requestId?: string, _bindingId?: string): void {
+    // Placeholder for telemetry/hints; currently no-op.
   }
 
   async applyNextEdit(
@@ -165,7 +200,7 @@ export class CursorStateMachine implements vscode.Disposable {
   }
 
   private async consumeStream(
-    request: Parameters<RpcClient['streamCpp']>[0],
+    request: Parameters<IRpcClient['streamCpp']>[0],
     ctx: SuggestionContext,
     abortController: AbortController,
   ): Promise<RawSuggestion[]> {
@@ -175,6 +210,7 @@ export class CursorStateMachine implements vscode.Disposable {
     let range: LineRange | undefined;
     let bindingId: string | undefined;
     let shouldTrimLeading = false;
+    let displayLocation: vscode.InlineCompletionDisplayLocation | undefined;
 
     const flush = () => {
       if (!range || !buffer) {
@@ -191,10 +227,12 @@ export class CursorStateMachine implements vscode.Disposable {
         range: this.toVsRange(ctx.document, range),
         bindingId,
         lineRange: range,
+        displayLocation,
       };
       results.push(suggestion);
       buffer = '';
       shouldTrimLeading = false;
+      displayLocation = undefined;
     };
 
     for await (const chunk of stream) {
@@ -214,6 +252,20 @@ export class CursorStateMachine implements vscode.Disposable {
       }
       if (chunk.cursorPredictionTarget?.shouldRetriggerCpp) {
         void vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+      }
+      if (chunk.cursorPredictionTarget?.lineNumberOneIndexed && chunk.cursorPredictionTarget.relativePath) {
+        const relative = vscode.workspace.asRelativePath(ctx.document.uri, false);
+        if (relative === chunk.cursorPredictionTarget.relativePath) {
+          const line = Math.max(0, chunk.cursorPredictionTarget.lineNumberOneIndexed - 1);
+          if (line < ctx.document.lineCount) {
+            const lineRange = ctx.document.lineAt(line).range;
+            displayLocation = {
+              range: lineRange,
+              label: 'Cursor Prediction',
+              kind: vscode.InlineCompletionDisplayLocationKind.Code,
+            };
+          }
+        }
       }
       if (chunk.beginEdit && results.length > 0) {
         flush();
@@ -314,5 +366,21 @@ export class CursorStateMachine implements vscode.Disposable {
       }
       this.requestBindings.delete(requestId);
     }
+  }
+
+  private cleanupIfFinished(requestId: string, bindingId?: string): void {
+    const session = this.followups.get(requestId);
+    if (session && session.queue.length > 0) {
+      return;
+    }
+    this.cleanupRequest(requestId, bindingId);
+  }
+
+  private cleanupRequest(requestId: string, bindingId?: string): void {
+    this.followups.delete(requestId);
+    if (bindingId) {
+      this.bindingCache.delete(bindingId);
+    }
+    this.forgetBindingsForRequest(requestId);
   }
 }

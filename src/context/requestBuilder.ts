@@ -9,7 +9,7 @@ import {
   StreamNextCursorPredictionRequest_VisibleRange,
   FilesyncUpdateWithModelVersion,
 } from '../rpc/cursor-tab_pb';
-import { DocumentTracker } from '../services/documentTracker';
+import { IDocumentTracker } from './contracts';
 
 export interface RequestContextOptions {
   readonly document: vscode.TextDocument;
@@ -25,7 +25,7 @@ export interface RequestContextOptions {
 }
 
 export function buildStreamRequest(
-  tracker: DocumentTracker,
+  tracker: IDocumentTracker,
   options: RequestContextOptions
 ): StreamCppRequest {
   const { currentFile, linterErrors } = buildFileInfo(options);
@@ -43,7 +43,7 @@ export function buildStreamRequest(
 }
 
 export function buildPredictionRequest(
-  tracker: DocumentTracker,
+  tracker: IDocumentTracker,
   options: RequestContextOptions
 ): StreamNextCursorPredictionRequest {
   const { currentFile, linterErrors } = buildFileInfo(options);

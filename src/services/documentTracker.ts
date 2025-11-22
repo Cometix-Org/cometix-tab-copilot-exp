@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { IDocumentTracker } from '../context/contracts';
 
 interface DiffEntry {
   readonly timestamp: number;
@@ -7,7 +8,7 @@ interface DiffEntry {
 
 const MAX_HISTORY = 10;
 
-export class DocumentTracker implements vscode.Disposable {
+export class DocumentTracker implements vscode.Disposable, IDocumentTracker {
   private readonly history = new Map<string, DiffEntry[]>();
   private readonly disposable: vscode.Disposable;
 

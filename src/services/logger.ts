@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ILogger } from '../context/contracts';
 
 export enum LogLevel {
   Info = 'info',
@@ -6,7 +7,7 @@ export enum LogLevel {
   Error = 'error',
 }
 
-export class Logger implements vscode.Disposable {
+export class Logger implements vscode.Disposable, ILogger {
   private readonly channel = vscode.window.createOutputChannel('Cursor Tab', { log: true });
 
   info(message: string): void {

@@ -1,13 +1,8 @@
 import * as vscode from 'vscode';
+import { IConfigService } from '../context/contracts';
+import { CursorFeatureFlags } from '../context/types';
 
-export interface CursorFeatureFlags {
-  readonly enableInlineSuggestions: boolean;
-  readonly enableCursorPrediction: boolean;
-  readonly enableDiagnosticsHints: boolean;
-  readonly excludedLanguages: string[];
-}
-
-export class ConfigService implements vscode.Disposable {
+export class ConfigService implements vscode.Disposable, IConfigService {
   private readonly emitter = new vscode.EventEmitter<CursorFeatureFlags>();
   readonly onDidChange = this.emitter.event;
   private current = this.readConfig();

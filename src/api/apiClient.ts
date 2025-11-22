@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { randomBytes } from 'crypto';
 import { getOrGenerateClientKey } from '../utils/checksum';
 import { DEFAULT_ENDPOINTS, ENDPOINT_MAPPINGS, EndpointType, getEndpointUrl } from './endpoints';
 import { 
@@ -33,9 +34,11 @@ export class ApiClient {
   private static channel: vscode.OutputChannel | undefined;
   private aiClient: AiClient | null = null;
   private fileSyncClient: FileSyncClient | null = null;
+  private readonly fsClientKey: string;
 
   constructor(config?: Partial<ApiClientConfig>) {
     this.config = this.loadConfig(config);
+    this.fsClientKey = randomBytes(32).toString('hex');
     if (!ApiClient.channel) {
       ApiClient.channel = vscode.window.createOutputChannel('CometixTab', { log: true });
     }
@@ -97,10 +100,15 @@ export class ApiClient {
             if (this.config.authToken) {
               req.header.set('Authorization', `Bearer ${this.config.authToken}`);
             }
+            const checksum = buildCursorChecksum(vscode.env.machineId);
+            if (checksum) {
+              req.header.set('x-cursor-checksum', checksum);
+            }
             if (this.config.clientKey) {
-              req.header.set('x-cursor-checksum', this.config.clientKey);
+              req.header.set('x-client-key', this.config.clientKey);
             }
             req.header.set('x-cursor-client-version', '1.5.5');
+            req.header.set('x-fs-client-key', this.fsClientKey);
             
             // 添加追踪头部
             const rid = cryptoRandomUUIDSafe();
@@ -157,10 +165,15 @@ export class ApiClient {
     // 根据端点类型使用不同的认证头部
     if (this.config.endpointType === EndpointType.OFFICIAL) {
       // 官方端点使用 x-cursor-checksum 和版本号
+      const checksum = buildCursorChecksum(vscode.env.machineId);
+      if (checksum) {
+        headers['x-cursor-checksum'] = checksum;
+      }
       if (this.config.clientKey) {
-        headers['x-cursor-checksum'] = this.config.clientKey;
+        headers['x-client-key'] = this.config.clientKey;
       }
       headers['x-cursor-client-version'] = '1.5.5';
+      headers['x-fs-client-key'] = this.fsClientKey;
     } else {
       // 自部署端点使用 x-client-key
       if (this.config.clientKey) {
@@ -655,16 +668,26 @@ export class ApiClient {
     }
   }
 
-  // Connect RPC 响应日志（成功时仅输出简要信息）
+  // Connect RPC 响应日志（成功时输出详细上下文）
   private async logConnectResponse(req: any, res: any) {
     try {
       const ts = new Date().toISOString();
       const url = req.url || 'unknown';
       const method = url.split('/').pop() || 'unknown';
-      
-      // 成功时只输出一行简要信息
-      ApiClient.channel?.appendLine(`[${ts}] ✓ ${method} → 200 OK`);
-      
+
+      const status = typeof res?.status === 'number' ? res.status : 200;
+      const responseBody = safeSerialize(res?.message ?? res);
+
+      ApiClient.channel?.appendLine(`[${ts}] ✓ ${method} → ${status} OK`);
+      if (this.lastRequestContext) {
+        ApiClient.channel?.appendLine(`[${ts}]   Request URL: ${this.lastRequestContext.url}`);
+        ApiClient.channel?.appendLine(`[${ts}]   Request Headers: ${JSON.stringify(this.lastRequestContext.headers)}`);
+        ApiClient.channel?.appendLine(`[${ts}]   Request Body (proto->json): ${this.lastRequestContext.body}`);
+      } else {
+        ApiClient.channel?.appendLine(`[${ts}]   Request context unavailable (possibly streaming body)`);
+      }
+      ApiClient.channel?.appendLine(`[${ts}]   Response Body (proto->json): ${responseBody}`);
+
       // 清除请求上下文
       this.lastRequestContext = null;
     } catch {
@@ -773,4 +796,43 @@ function serializeMessage(message: unknown): string {
     return JSON.stringify(payload);
   }
   return JSON.stringify(message);
+}
+
+function safeSerialize(value: unknown, maxLength = 4000): string {
+  try {
+    const text = serializeMessage(value);
+    if (text.length > maxLength) {
+      return `${text.slice(0, maxLength)}...`;
+    }
+    return text;
+  } catch {
+    return '<unserializable>';
+  }
+}
+
+// Build the Cursor-style checksum header: obfuscated timestamp + machineId
+function buildCursorChecksum(machineId: string | undefined): string | undefined {
+  if (!machineId) {
+    return undefined;
+  }
+  try {
+    const ts = Math.floor(Date.now() / 1e6); // matches official client
+    const buf = new Uint8Array([
+      (ts >> 40) & 255,
+      (ts >> 32) & 255,
+      (ts >> 24) & 255,
+      (ts >> 16) & 255,
+      (ts >> 8) & 255,
+      ts & 255
+    ]);
+    let seed = 165;
+    for (let i = 0; i < buf.length; i++) {
+      buf[i] = (buf[i] ^ seed) + (i % 256);
+      seed = buf[i];
+    }
+    const encoded = Buffer.from(buf).toString('base64').replace(/=+$/, '');
+    return `${encoded}${machineId}`;
+  } catch {
+    return undefined;
+  }
 }

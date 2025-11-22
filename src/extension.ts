@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
 	container.registerSingleton('tracker', () => new DocumentTracker());
 	container.registerSingleton('rpcClient', (c) => new RpcClient(c.resolve('logger')));
 	container.registerSingleton('config', () => new ConfigService());
-	container.registerSingleton('fileSyncUpdates', () => new FilesyncUpdatesStore());
+	container.registerSingleton('fileSyncUpdates', (c) => new FilesyncUpdatesStore(c.resolve('logger')));
 	container.registerSingleton('fileSync', (c) => new FileSyncCoordinator(
 		c.resolve('rpcClient'),
 		c.resolve('logger'),
@@ -31,23 +31,27 @@ export function activate(context: vscode.ExtensionContext) {
 			c.resolve('rpcClient'),
 			c.resolve('logger'),
 			c.resolve('config'),
+			c.resolve('fileSync'),
+			c.resolve('cursorPrediction')
+		)
+	);
+	container.registerSingleton('cursorPrediction', (c) =>
+		new CursorPredictionController(
+			c.resolve('tracker'),
+			c.resolve('rpcClient'),
+			c.resolve('config'),
+			c.resolve('logger'),
 			c.resolve('fileSync')
 		)
 	);
 
 	const logger = container.resolve<Logger>('logger');
 	const stateMachine = container.resolve<CursorStateMachine>('cursorStateMachine');
-	const tracker = container.resolve<DocumentTracker>('tracker');
-	const rpcClient = container.resolve<RpcClient>('rpcClient');
-	const config = container.resolve<ConfigService>('config');
-	const fileSync = container.resolve<FileSyncCoordinator>('fileSync');
+	container.resolve<CursorPredictionController>('cursorPrediction');
 
 	registerInlineCompletionProvider(stateMachine, context.subscriptions);
 	registerInlineAcceptCommand(stateMachine, logger, context.subscriptions);
 	registerNextEditCommand(stateMachine, logger, context.subscriptions);
-
-	const predictionController = new CursorPredictionController(tracker, rpcClient, config, logger, fileSync);
-	context.subscriptions.push(predictionController);
 
 	logger.info('Cometix Tab extension activated');
 }

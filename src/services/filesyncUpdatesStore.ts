@@ -4,6 +4,7 @@ import {
   SingleUpdateRequest,
   SimpleRange,
 } from '../rpc/cursor-tab_pb';
+import { ILogger } from '../context/contracts';
 
 const MAX_QUEUE_LENGTH = 30;
 
@@ -24,7 +25,7 @@ export class FilesyncUpdatesStore implements vscode.Disposable {
   private readonly updates = new Map<string, FilesyncUpdateWithModelVersion[]>();
   private readonly disposable: vscode.Disposable;
 
-  constructor() {
+  constructor(private readonly logger?: ILogger) {
     this.disposable = vscode.workspace.onDidChangeTextDocument((event) => {
       if (isWorkspaceFile(event.document)) {
         this.recordUpdate(event);
@@ -35,6 +36,14 @@ export class FilesyncUpdatesStore implements vscode.Disposable {
   getUpdates(uri: vscode.Uri, minVersionExclusive: number): FilesyncUpdateWithModelVersion[] {
     const queue = this.updates.get(uri.toString()) ?? [];
     return queue.filter((entry) => entry.modelVersion > minVersionExclusive);
+  }
+
+  getLatestVersion(uri: vscode.Uri): number | undefined {
+    const queue = this.updates.get(uri.toString());
+    if (!queue?.length) {
+      return undefined;
+    }
+    return queue[queue.length - 1].modelVersion;
   }
 
   dropThrough(uri: vscode.Uri, version: number): void {
@@ -86,6 +95,31 @@ export class FilesyncUpdatesStore implements vscode.Disposable {
       queue.shift();
     }
     this.updates.set(key, queue);
+    this.logger?.info(
+      `Queued filesync update v${record.modelVersion} for ${relativePath} (changes=${updates.length}, queueSize=${queue.length}, expectedLength=${record.expectedFileLength}) :: ${this.describeUpdates(updates)}`,
+    );
+  }
+
+  private describeUpdates(updates: SingleUpdateRequest[]): string {
+    return updates
+      .map((update, index) => {
+        const start = `${update.range?.startLineNumber ?? '?'}:${update.range?.startColumn ?? '?'}`;
+        const end = `${update.range?.endLineNumberInclusive ?? '?'}:${update.range?.endColumn ?? '?'}`;
+        const delta = (update.replacedString?.length ?? 0) - (update.changeLength ?? 0);
+        const preview = this.truncate(update.replacedString ?? '', 80);
+        return `#${index + 1} ${start}-${end} delta=${delta} text="${preview}"`;
+      })
+      .join('; ');
+  }
+
+  private truncate(text: string, maxLength: number): string {
+    if (!text) {
+      return '';
+    }
+    const cleaned = text.replace(/\r?\n/g, '\\n');
+    if (cleaned.length <= maxLength) {
+      return cleaned;
+    }
+    return `${cleaned.slice(0, maxLength)}...`;
   }
 }
-

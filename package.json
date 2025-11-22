@@ -7,6 +7,9 @@
   "engines": {
     "vscode": "^1.103.1"
   },
+  "enabledApiProposals": [
+    "inlineCompletionsAdditions"
+  ],
   "categories": [
     "Other"
   ],
@@ -54,19 +57,10 @@
           "default": [],
           "description": "List of VS Code language identifiers where inline suggestions should be disabled."
         },
-        "cometixTab.endpointType": {
-          "type": "string",
-          "enum": [
-            "official",
-            "self-hosted"
-          ],
-          "default": "official",
-          "description": "Select the Cursor API endpoint to talk to."
-        },
         "cometixTab.serverUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional override for the Cursor API base URL."
+          "description": "Optional override for the official Cursor API base URL."
         },
         "cometixTab.authToken": {
           "type": "string",

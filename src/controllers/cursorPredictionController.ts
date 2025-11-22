@@ -1,61 +1,69 @@
 import * as vscode from 'vscode';
-import { RpcClient } from '../services/rpcClient';
-import { DocumentTracker } from '../services/documentTracker';
-import { ConfigService } from '../services/configService';
-import { Logger } from '../services/logger';
+import { ConnectError, Code } from '@connectrpc/connect';
+import {
+  IRpcClient,
+  IDocumentTracker,
+  IConfigService,
+  ILogger,
+  ICursorPredictionController,
+  IFileSyncCoordinator,
+} from '../context/contracts';
 import { buildPredictionRequest } from '../context/requestBuilder';
 import { StreamNextCursorPredictionResponse } from '../rpc/cursor-tab_pb';
-import { FileSyncCoordinator } from '../services/fileSyncCoordinator';
 
-export class CursorPredictionController implements vscode.Disposable {
+/**
+ * Coordinates when and how cursor prediction RPCs are fired.
+ * Triggered explicitly after an inline suggestion is accepted rather than on every cursor move.
+ */
+export class CursorPredictionController implements vscode.Disposable, ICursorPredictionController {
   private readonly decoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
     backgroundColor: new vscode.ThemeColor('editor.wordHighlightBackground'),
     outline: '1px dashed var(--vscode-textLink-activeForeground)',
   });
   private readonly disposables: vscode.Disposable[] = [];
-  private pendingTimeout: NodeJS.Timeout | undefined;
   private activeAbort: AbortController | undefined;
 
   constructor(
-    private readonly tracker: DocumentTracker,
-    private readonly rpc: RpcClient,
-    private readonly config: ConfigService,
-    private readonly logger: Logger,
-    private readonly fileSync: FileSyncCoordinator
+    private readonly tracker: IDocumentTracker,
+    private readonly rpc: IRpcClient,
+    private readonly config: IConfigService,
+    private readonly logger: ILogger,
+    private readonly fileSync: IFileSyncCoordinator
   ) {
     this.disposables.push(
-      vscode.window.onDidChangeTextEditorSelection((event) => this.schedulePrediction(event.textEditor)),
-      vscode.window.onDidChangeActiveTextEditor((editor) => editor && this.schedulePrediction(editor))
+      vscode.workspace.onDidChangeTextDocument((event) => this.clearForDocument(event.document)),
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (editor) {
+          this.clearForDocument(editor.document);
+        }
+      })
     );
   }
 
   dispose(): void {
     this.decoration.dispose();
     this.disposables.forEach((d) => d.dispose());
-    if (this.pendingTimeout) {
-      clearTimeout(this.pendingTimeout);
-    }
     this.activeAbort?.abort();
   }
 
-  private schedulePrediction(editor?: vscode.TextEditor): void {
-    if (!editor || !this.config.flags.enableCursorPrediction) {
-      return;
-    }
-    if (this.pendingTimeout) {
-      clearTimeout(this.pendingTimeout);
-    }
-    this.pendingTimeout = setTimeout(() => this.requestPrediction(editor), 200);
-  }
-
-  private async requestPrediction(editor: vscode.TextEditor): Promise<void> {
+  async handleSuggestionAccepted(editor: vscode.TextEditor): Promise<void> {
     if (!this.config.flags.enableCursorPrediction) {
       return;
     }
+    await this.requestPrediction(editor);
+  }
+
+  clearForDocument(document: vscode.TextDocument): void {
+    const editors = vscode.window.visibleTextEditors.filter((e) => e.document === document);
+    for (const editor of editors) {
+      editor.setDecorations(this.decoration, []);
+    }
+  }
+
+  private async requestPrediction(editor: vscode.TextEditor): Promise<void> {
     const document = editor.document;
     const position = editor.selection.active;
-    await this.fileSync.prepareDocument(document);
     const syncPayload = this.fileSync.getSyncPayload(document);
     const request = buildPredictionRequest(this.tracker, {
       document,
@@ -80,7 +88,7 @@ export class CursorPredictionController implements vscode.Disposable {
         break;
       }
     } catch (error) {
-      if ((error as Error).name !== 'AbortError') {
+      if (!this.isAbortError(error)) {
         this.logger.error('Cursor prediction failed', error);
       }
     }
@@ -106,5 +114,23 @@ export class CursorPredictionController implements vscode.Disposable {
       return new vscode.Range(insertPos, insertPos);
     }
     return null;
+  }
+
+  private isAbortError(error: unknown): boolean {
+    if (!error) {
+      return false;
+    }
+    if (error instanceof ConnectError && error.code === Code.Canceled) {
+      return true;
+    }
+    if (error instanceof Error) {
+      if (error.name === 'AbortError') {
+        return true;
+      }
+      if (/operation was aborted/i.test(error.message)) {
+        return true;
+      }
+    }
+    return false;
   }
 }

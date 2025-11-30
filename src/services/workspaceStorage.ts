@@ -66,8 +66,8 @@ export class WorkspaceStorage implements vscode.Disposable {
     }
 
     // Cache the result
-    // Cursor appends a version suffix (tGo), we use a constant version identifier
-    const VERSION_SUFFIX = 'v1';
+    // Cursor appends a version suffix (tGo = "git30_000_bounded_auto")
+    const VERSION_SUFFIX = 'git30_000_bounded_auto';
     this.cachedWorkspaceId = `${workspaceId}-${VERSION_SUFFIX}`;
     
     return this.cachedWorkspaceId;

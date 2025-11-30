@@ -46,28 +46,16 @@ export class ApiClient {
   private succeeded: string[] = [];
   private readonly DONE_SENTINEL = 'm4CoTMbqtR9vV1zd';
   private cppEvents: Array<any> = [];
-  private uniqueWorkspaceId: string;
   // Store preflight proto->json bodies by request id for formal logging
   private pendingRequestBodiesById: Map<string, unknown> = new Map();
 
   constructor(config?: Partial<ApiClientConfig>) {
     this.config = this.loadConfig(config);
     this.fsClientKey = randomBytes(32).toString('hex');
-    this.uniqueWorkspaceId = this.getOrInitWorkspaceId();
     if (!ApiClient.channel) {
       ApiClient.channel = vscode.window.createOutputChannel('CometixTab', { log: true });
     }
     this.initializeClients();
-  }
-
-  private getOrInitWorkspaceId(): string {
-    const cfg = vscode.workspace.getConfiguration('cometixTab');
-    let id = cfg.get<string>('uniqueCppWorkspaceId') || '';
-    if (!id) {
-      id = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-      void cfg.update('uniqueCppWorkspaceId', id, vscode.ConfigurationTarget.Workspace);
-    }
-    return id;
   }
 
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
@@ -397,7 +385,7 @@ export class ApiClient {
         isDebug,
         supportsCpt: true,
         supportsCrlfCpt: true,
-        workspaceId: this.uniqueWorkspaceId,
+        workspaceId: (request as any)?.workspaceId ?? '',
         timeSinceRequestStart: Math.max(0, Date.now() - options.startOfCpp),
         timeAtRequestSend: Date.now(),
         clientTimezoneOffset: new Date().getTimezoneOffset(),

@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { ConnectError, Code } from '@connectrpc/connect';
 import {
   IRpcClient,
   IDocumentTracker,
@@ -8,12 +7,16 @@ import {
   ICursorPredictionController,
   IFileSyncCoordinator,
 } from '../context/contracts';
-import { buildPredictionRequest } from '../context/requestBuilder';
-import { StreamNextCursorPredictionResponse } from '../rpc/cursor-tab_pb';
 
 /**
- * Coordinates when and how cursor prediction RPCs are fired.
- * Triggered explicitly after an inline suggestion is accepted rather than on every cursor move.
+ * Coordinates cursor prediction display.
+ * 
+ * NOTE: The standalone StreamNextCursorPrediction RPC is not implemented on Cursor's server.
+ * Cursor prediction now works through the FUSED model - cursor prediction info is returned
+ * as part of StreamCppResponse.cursorPredictionTarget, which is handled in cursorStateMachine.ts.
+ * 
+ * This controller now only manages the decoration display for cursor prediction hints
+ * that come through the fused model.
  */
 export class CursorPredictionController implements vscode.Disposable, ICursorPredictionController {
   private readonly decoration = vscode.window.createTextEditorDecorationType({
@@ -22,14 +25,13 @@ export class CursorPredictionController implements vscode.Disposable, ICursorPre
     outline: '1px dashed var(--vscode-textLink-activeForeground)',
   });
   private readonly disposables: vscode.Disposable[] = [];
-  private activeAbort: AbortController | undefined;
 
   constructor(
-    private readonly tracker: IDocumentTracker,
-    private readonly rpc: IRpcClient,
-    private readonly config: IConfigService,
-    private readonly logger: ILogger,
-    private readonly fileSync: IFileSyncCoordinator
+    private readonly _tracker: IDocumentTracker,
+    private readonly _rpc: IRpcClient,
+    private readonly _config: IConfigService,
+    private readonly _logger: ILogger,
+    private readonly _fileSync: IFileSyncCoordinator
   ) {
     this.disposables.push(
       vscode.workspace.onDidChangeTextDocument((event) => this.clearForDocument(event.document)),
@@ -44,14 +46,18 @@ export class CursorPredictionController implements vscode.Disposable, ICursorPre
   dispose(): void {
     this.decoration.dispose();
     this.disposables.forEach((d) => d.dispose());
-    this.activeAbort?.abort();
   }
 
-  async handleSuggestionAccepted(editor: vscode.TextEditor): Promise<void> {
-    if (!this.config.flags.enableCursorPrediction) {
-      return;
-    }
-    await this.requestPrediction(editor);
+  /**
+   * Called after a suggestion is accepted.
+   * NOTE: The standalone StreamNextCursorPrediction RPC is NOT implemented.
+   * Cursor prediction is now handled via the fused model in StreamCppResponse.cursorPredictionTarget.
+   */
+  async handleSuggestionAccepted(_editor: vscode.TextEditor): Promise<void> {
+    // The standalone StreamNextCursorPrediction RPC returns "unimplemented".
+    // Cursor prediction is handled via the fused model (cursorPredictionTarget in StreamCppResponse)
+    // which is processed in cursorStateMachine.ts and displayed via InlineCompletionItem.displayLocation.
+    // This method is kept for interface compatibility but does nothing.
   }
 
   clearForDocument(document: vscode.TextDocument): void {
@@ -61,76 +67,16 @@ export class CursorPredictionController implements vscode.Disposable, ICursorPre
     }
   }
 
-  private async requestPrediction(editor: vscode.TextEditor): Promise<void> {
-    const document = editor.document;
-    const position = editor.selection.active;
-    const syncPayload = this.fileSync.getSyncPayload(document);
-    const request = buildPredictionRequest(this.tracker, {
-      document,
-      position,
-      visibleRanges: Array.from(editor.visibleRanges),
-      filesyncUpdates: syncPayload.updates,
-      relyOnFileSync: syncPayload.relyOnFileSync,
-      fileVersion: document.version,
-      lineEnding: document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n',
-    });
-
-    this.activeAbort?.abort();
-    this.activeAbort = new AbortController();
-
-    try {
-      const stream = await this.rpc.streamNextCursorPrediction(request, this.activeAbort);
-      for await (const chunk of stream) {
-        const range = this.resolveRange(chunk, editor);
-        if (range) {
-          editor.setDecorations(this.decoration, [range]);
-        }
-        break;
-      }
-    } catch (error) {
-      if (!this.isAbortError(error)) {
-        this.logger.error('Cursor prediction failed', error);
-      }
+  /**
+   * Show a cursor prediction decoration at the specified line.
+   * Can be called externally when fused cursor prediction is received.
+   */
+  showPredictionAt(editor: vscode.TextEditor, line: number): void {
+    if (line < 0 || line >= editor.document.lineCount) {
+      return;
     }
+    const range = editor.document.lineAt(line).range;
+    editor.setDecorations(this.decoration, [range]);
   }
 
-  private resolveRange(
-    response: StreamNextCursorPredictionResponse,
-    editor: vscode.TextEditor
-  ): vscode.Range | null {
-    if (!response.response) {
-      return null;
-    }
-    if (response.response.case === 'lineNumber') {
-      const line = Math.max(0, response.response.value - 1);
-      if (line >= editor.document.lineCount) {
-        return null;
-      }
-      return editor.document.lineAt(line).range;
-    }
-    if (response.response.case === 'text') {
-      const line = editor.selection.active.line;
-      const insertPos = new vscode.Position(line, editor.selection.active.character);
-      return new vscode.Range(insertPos, insertPos);
-    }
-    return null;
-  }
-
-  private isAbortError(error: unknown): boolean {
-    if (!error) {
-      return false;
-    }
-    if (error instanceof ConnectError && error.code === Code.Canceled) {
-      return true;
-    }
-    if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        return true;
-      }
-      if (/operation was aborted/i.test(error.message)) {
-        return true;
-      }
-    }
-    return false;
-  }
 }

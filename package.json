@@ -17,7 +17,8 @@
     "onStartupFinished",
     "onLanguage:*",
     "onCommand:cometix-tab.inlineAccept",
-    "onCommand:cometix-tab.applyNextEdit"
+    "onCommand:cometix-tab.applyNextEdit",
+    "onCommand:cometix-tab.goToCursorPrediction"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -29,6 +30,10 @@
       {
         "command": "cometix-tab.applyNextEdit",
         "title": "Cursor Tab: Apply Next Edit"
+      },
+      {
+        "command": "cometix-tab.goToCursorPrediction",
+        "title": "Cursor Tab: Go To Cursor Prediction"
       }
     ],
     "configuration": {
@@ -71,6 +76,46 @@
           "type": "string",
           "default": "",
           "description": "Client key or checksum passed to Cursor services. Leave blank to auto-generate."
+        },
+        "cometixTab.enableAdditionalFilesContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include context from recently viewed files in completion requests."
+        },
+        "cometixTab.cppTriggerInComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow inline suggestions to be triggered while the cursor is in a comment."
+        },
+        "cometixTab.debug.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable debug logging for troubleshooting."
+        },
+        "cometixTab.debug.logStream": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log stream chunks and edit processing."
+        },
+        "cometixTab.debug.logEditCombine": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log detailed edit combination steps."
+        },
+        "cometixTab.debug.logFileSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log file synchronization operations."
+        },
+        "cometixTab.debug.logRpc": {
+          "type": "boolean",
+          "default": true,
+          "description": "Log RPC requests and responses."
+        },
+        "cometixTab.debug.verbosePayloads": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log full payload contents (can be very verbose)."
         }
       }
     }

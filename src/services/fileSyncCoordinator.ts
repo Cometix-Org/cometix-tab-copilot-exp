@@ -11,7 +11,9 @@ import { FilesyncUpdatesStore } from './filesyncUpdatesStore';
 
 const MAX_VERSION_LAG = 10;
 const MAX_VERSION_DRIFT = 100;
-const SUCCESS_THRESHOLD = 5;
+// Reduced from 5 to 2 for faster initial completion availability
+// The server requires a few successful syncs before accepting relyOnFileSync=true
+const SUCCESS_THRESHOLD = 2;
 const CATCHUP_RETRIES = 8;
 const CATCHUP_DELAY_MS = 4;
 const SYNC_DEBOUNCE_MS = 250;
@@ -75,6 +77,8 @@ export class FileSyncCoordinator implements vscode.Disposable, IFileSyncCoordina
       return { relyOnFileSync: false, updates: [] };
     }
     const relyOnFileSync = this.shouldRelyOnFileSync(document);
+    // Per Cursor's implementation: only include filesyncUpdates when relyOnFileSync is true
+    // When relyOnFileSync is false, send full contents with NO updates
     if (!relyOnFileSync) {
       return { relyOnFileSync: false, updates: [] };
     }

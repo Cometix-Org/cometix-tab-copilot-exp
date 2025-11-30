@@ -12,7 +12,7 @@ import {
   StreamNextCursorPredictionRequest,
   StreamNextCursorPredictionResponse,
 } from '../rpc/cursor-tab_pb';
-import { CursorFeatureFlags } from './types';
+import { CursorFeatureFlags, DebugConfig } from './types';
 
 export interface ILogger extends vscode.Disposable {
   info(message: string): void;
@@ -22,6 +22,7 @@ export interface ILogger extends vscode.Disposable {
 
 export interface IConfigService extends vscode.Disposable {
   readonly flags: CursorFeatureFlags;
+  readonly debug: DebugConfig;
   readonly onDidChange: vscode.Event<CursorFeatureFlags>;
 }
 
@@ -31,7 +32,21 @@ export interface IDocumentTracker extends vscode.Disposable {
 }
 
 export interface IRpcClient extends vscode.Disposable {
-  streamCpp(request: StreamCppRequest, abortController?: AbortController): Promise<AsyncIterable<StreamCppResponse>>;
+  // Start server-streaming Cpp request and buffer results internally (cursor-style)
+  streamCpp(
+    request: StreamCppRequest,
+    options: { generateUuid: string; startOfCpp: number; abortController?: AbortController }
+  ): Promise<void>;
+  flushCpp(
+    requestId: string
+  ): Promise<
+    | { type: 'success'; buffer: Array<string | any>; modelInfo?: any }
+    | { type: 'failure'; reason: string }
+  >;
+  cancelCpp(requestId: string): void;
+  getCppReport(): Promise<{ events: any[] }>;
+
+  // Other RPCs
   streamNextCursorPrediction(
     request: StreamNextCursorPredictionRequest,
     abortController?: AbortController
@@ -50,4 +65,61 @@ export interface IFileSyncCoordinator extends vscode.Disposable {
 export interface ICursorPredictionController extends vscode.Disposable {
   handleSuggestionAccepted(editor: vscode.TextEditor): Promise<void>;
   clearForDocument(document: vscode.TextDocument): void;
+  showPredictionAt(editor: vscode.TextEditor, line: number): void;
+}
+
+export interface IDebounceManager extends vscode.Disposable {
+  runRequest(): {
+    generationUUID: string;
+    startTime: number;
+    abortController: AbortController;
+    requestIdsToCancel: string[];
+  };
+  shouldDebounce(requestId: string): Promise<boolean>;
+  removeRequest(requestId: string): void;
+  abortRequest(requestId: string): void;
+  abortAll(): void;
+  getRequestCount(): number;
+  setDebounceDurations(options: {
+    clientDebounceDuration?: number;
+    totalDebounceDuration?: number;
+    maxConcurrentStreams?: number;
+  }): void;
+}
+
+export interface IRecentFilesTracker extends vscode.Disposable {
+  getAdditionalFilesContext(
+    currentUri: vscode.Uri,
+    fetchContent?: boolean
+  ): Promise<import('./types').AdditionalFileInfo[]>;
+}
+
+export interface ILspSuggestionsTracker extends vscode.Disposable {
+  recordSuggestions(documentUri: string, suggestions: string[]): void;
+  getRelevantSuggestions(documentUri: string): import('./types').LspSuggestionsContext;
+  captureCompletionsAt(document: vscode.TextDocument, position: vscode.Position): Promise<void>;
+}
+
+export interface ITelemetryService extends vscode.Disposable {
+  recordTriggerStart(requestId: string): void;
+  recordTriggerEvent(
+    document: vscode.TextDocument,
+    requestId: string,
+    position: vscode.Position,
+    source: import('./types').TriggerSource
+  ): void;
+  recordSuggestionEvent(
+    document: vscode.TextDocument,
+    requestId: string,
+    suggestionText: string
+  ): void;
+  recordAcceptEvent(document: vscode.TextDocument, requestId: string, acceptedLength: number): void;
+  recordRejectEvent(document: vscode.TextDocument, requestId: string, reason?: string): void;
+  recordPartialAcceptEvent(
+    document: vscode.TextDocument,
+    requestId: string,
+    acceptedLength: number,
+    kind: 'word' | 'line' | 'suggest' | 'unknown'
+  ): void;
+  recordGenerationFinished(requestId: string, success: boolean): void;
 }

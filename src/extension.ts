@@ -11,6 +11,12 @@ import { registerInlineAcceptCommand } from './commands/inlineAcceptCommand';
 import { CursorPredictionController } from './controllers/cursorPredictionController';
 import { FilesyncUpdatesStore } from './services/filesyncUpdatesStore';
 import { registerNextEditCommand } from './commands/nextEditCommand';
+import { registerCursorPredictionCommand } from './commands/cursorPredictionCommand';
+// New services for enhanced functionality
+import { DebounceManager } from './services/debounceManager';
+import { RecentFilesTracker } from './services/recentFilesTracker';
+import { TelemetryService } from './services/telemetryService';
+import { LspSuggestionsTracker } from './services/lspSuggestionsTracker';
 
 export function activate(context: vscode.ExtensionContext) {
 	const container = new ServiceContainer(context);
@@ -25,6 +31,13 @@ export function activate(context: vscode.ExtensionContext) {
 		c.resolve('logger'),
 		c.resolve('fileSyncUpdates')
 	));
+	
+	// New services for cursor-style functionality
+	container.registerSingleton('debounceManager', (c) => new DebounceManager(c.resolve('logger')));
+	container.registerSingleton('recentFilesTracker', (c) => new RecentFilesTracker(c.resolve('logger')));
+	container.registerSingleton('telemetryService', (c) => new TelemetryService(c.resolve('logger')));
+	container.registerSingleton('lspSuggestionsTracker', (c) => new LspSuggestionsTracker(c.resolve('logger')));
+	
 	container.registerSingleton('cursorStateMachine', (c) =>
 		new CursorStateMachine(
 			c.resolve('tracker'),
@@ -32,7 +45,12 @@ export function activate(context: vscode.ExtensionContext) {
 			c.resolve('logger'),
 			c.resolve('config'),
 			c.resolve('fileSync'),
-			c.resolve('cursorPrediction')
+			c.resolve('cursorPrediction'),
+			// New service dependencies
+			c.resolve('debounceManager'),
+			c.resolve('recentFilesTracker'),
+			c.resolve('telemetryService'),
+			c.resolve('lspSuggestionsTracker')
 		)
 	);
 	container.registerSingleton('cursorPrediction', (c) =>
@@ -49,9 +67,10 @@ export function activate(context: vscode.ExtensionContext) {
 	const stateMachine = container.resolve<CursorStateMachine>('cursorStateMachine');
 	container.resolve<CursorPredictionController>('cursorPrediction');
 
-	registerInlineCompletionProvider(stateMachine, context.subscriptions);
+	registerInlineCompletionProvider(stateMachine, logger, context.subscriptions);
 	registerInlineAcceptCommand(stateMachine, logger, context.subscriptions);
 	registerNextEditCommand(stateMachine, logger, context.subscriptions);
+	registerCursorPredictionCommand(logger, context.subscriptions);
 
 	logger.info('Cometix Tab extension activated');
 }

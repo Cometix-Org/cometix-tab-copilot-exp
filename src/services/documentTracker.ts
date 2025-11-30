@@ -34,10 +34,16 @@ export class DocumentTracker implements vscode.Disposable, IDocumentTracker {
     const entries = this.history.get(key) ?? [];
 
     for (const change of event.contentChanges) {
-      const diff = change.text.slice(-256);
-      if (!diff) {
+      // For insertions/replacements, record the new text
+      // For deletions (empty text), record a special marker to indicate deletion happened
+      const diff = change.text ? change.text.slice(-256) : '';
+      
+      // Skip if no meaningful change (both old and new are empty/whitespace only)
+      if (!diff && change.rangeLength === 0) {
         continue;
       }
+      
+      // Record the change - empty string for deletions is meaningful context
       entries.push({ timestamp: Date.now(), change: diff });
     }
 

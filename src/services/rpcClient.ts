@@ -4,7 +4,6 @@ import {
   RefreshTabContextRequest,
   RefreshTabContextResponse,
   StreamCppRequest,
-  StreamCppResponse,
   StreamNextCursorPredictionRequest,
   StreamNextCursorPredictionResponse,
   FSUploadFileRequest,
@@ -30,10 +29,27 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
     );
   }
 
-  async streamCpp(request: StreamCppRequest, abortController?: AbortController): Promise<AsyncIterable<StreamCppResponse>> {
-    this.logger.info(`[rpc] StreamCpp request: ${this.stringifyPayload(request)}`);
-    const iterable = await this.client.streamCpp(request, abortController);
-    return this.logStream('StreamCpp', iterable);
+  async streamCpp(
+    request: StreamCppRequest,
+    options: { generateUuid: string; startOfCpp: number; abortController?: AbortController }
+  ): Promise<void> {
+    this.logger.info(`[rpc] StreamCpp request start: ${this.stringifyPayload(request)}`);
+    await this.client.streamCpp(request, options as any);
+  }
+
+  async flushCpp(requestId: string): Promise<
+    | { type: 'success'; buffer: Array<string | any>; modelInfo?: any }
+    | { type: 'failure'; reason: string }
+  > {
+    return this.client.flushCpp(requestId as any);
+  }
+
+  cancelCpp(requestId: string): void {
+    this.client.cancelCpp(requestId);
+  }
+
+  async getCppReport(): Promise<{ events: any[] }> {
+    return this.client.getCppReport();
   }
 
   async streamNextCursorPrediction(

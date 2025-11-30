@@ -34,14 +34,40 @@ export class ApiClient {
   private aiClient: AiClient | null = null;
   private fileSyncClient: FileSyncClient | null = null;
   private readonly fsClientKey: string;
+  private readonly requestContextMap: WeakMap<any, { url: string; headers: Record<string, string>; body: string; timestamp: string } > = new WeakMap();
+  // cursor-style streaming state
+  private streams: Array<{
+    generationUUID: string;
+    abortController: AbortController;
+    startTime: number;
+    modelInfo?: any;
+    buffer: Array<string | any>;
+  }> = [];
+  private succeeded: string[] = [];
+  private readonly DONE_SENTINEL = 'm4CoTMbqtR9vV1zd';
+  private cppEvents: Array<any> = [];
+  private uniqueWorkspaceId: string;
+  // Store preflight proto->json bodies by request id for formal logging
+  private pendingRequestBodiesById: Map<string, unknown> = new Map();
 
   constructor(config?: Partial<ApiClientConfig>) {
     this.config = this.loadConfig(config);
     this.fsClientKey = randomBytes(32).toString('hex');
+    this.uniqueWorkspaceId = this.getOrInitWorkspaceId();
     if (!ApiClient.channel) {
       ApiClient.channel = vscode.window.createOutputChannel('CometixTab', { log: true });
     }
     this.initializeClients();
+  }
+
+  private getOrInitWorkspaceId(): string {
+    const cfg = vscode.workspace.getConfiguration('cometixTab');
+    let id = cfg.get<string>('uniqueCppWorkspaceId') || '';
+    if (!id) {
+      id = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+      void cfg.update('uniqueCppWorkspaceId', id, vscode.ConfigurationTarget.Workspace);
+    }
+    return id;
   }
 
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
@@ -49,7 +75,7 @@ export class ApiClient {
 
     const customBaseUrl = override?.baseUrl || vscodeConfig.get<string>('serverUrl');
 
-    // 智能URL检测：如果用户没有设置自定义URL，或者当前URL不是官方域名，使用默认官方URL
+    // 閺呴缚鍏楿RL濡�偓濞村�绱版俊鍌涚亯閻€劍鍩涘▽鈩冩箒鐠佸墽鐤嗛懛顏勭暰娑斿�RL閿涘本鍨ㄩ懓鍛�秼閸撳硨RL娑撳秵妲哥€规ɑ鏌熼崺鐔锋倳閿涘奔濞囬悽銊╃帛鐠併倕鐣奸弬绛揜L
     let baseUrl: string;
     if (!customBaseUrl || customBaseUrl.trim() === '') {
       baseUrl = DEFAULT_BASE_URL;
@@ -58,11 +84,11 @@ export class ApiClient {
       baseUrl = isOfficialUrl ? customBaseUrl : DEFAULT_BASE_URL;
     }
 
-    // 如果没有客户端密钥，自动生成一个
+    // 婵″倹鐏夊▽鈩冩箒鐎广垺鍩涚粩顖氱槕闁姐儻绱濋懛顏勫З閻㈢喐鍨氭稉鈧??
     let clientKey = override?.clientKey || vscodeConfig.get<string>('clientKey') || '';
     if (!clientKey || clientKey.trim() === '') {
       clientKey = getOrGenerateClientKey();
-      // 保存生成的客户端密钥到配置中
+      // 娣囨繂鐡ㄩ悽鐔稿灇閻ㄥ嫬顓归幋椋庮伂鐎靛棝鎸滈崚浼村帳缂冾喕鑵?
       vscodeConfig.update('clientKey', clientKey, vscode.ConfigurationTarget.Global);
     }
 
@@ -79,7 +105,7 @@ export class ApiClient {
       httpVersion: '1.1',
       interceptors: [
         (next: any) => async (req: any) => {
-          // 添加认证头部
+          // 濞ｈ�濮炵拋銈堢槈婢舵挳鍎?
           if (this.config.authToken) {
             req.header.set('Authorization', `Bearer ${this.config.authToken}`);
           }
@@ -93,7 +119,7 @@ export class ApiClient {
           req.header.set('x-cursor-client-version', '1.5.5');
           req.header.set('x-fs-client-key', this.fsClientKey);
           
-          // 添加追踪头部
+          // 濞ｈ�濮炴潻鍊熼嚋婢舵挳鍎?
           const rid = cryptoRandomUUIDSafe();
           req.header.set('x-request-id', rid);
           req.header.set('x-amzn-trace-id', `Root=${rid}`);
@@ -102,11 +128,15 @@ export class ApiClient {
             req.header.set('x-cursor-timezone', tz);
           } catch { }
 
-          // 日志记录
+          // 閺冦儱绻旂拋鏉跨秿
           await this.logConnectRequest(req);
           
           try {
             const result = await next(req);
+            // 濞翠礁绱￠崫宥呯安閿涙艾瀵樼憗鍛�簰鐠佹澘缍嶅В蹇庨嚋閸掑棛澧?
+            if (isAsyncIterable(result)) {
+              return this.wrapStreamingResponseWithLogging(req, result);
+            }
             await this.logConnectResponse(req, result);
             return result;
           } catch (error) {
@@ -162,7 +192,7 @@ export class ApiClient {
     return headers;
   }
 
-  // Fetch 请求上下文（用于错误时输出）
+  // Fetch 鐠囬攱鐪版稉濠佺瑓閺傚浄绱欓悽銊ょ艾闁挎瑨顕ら弮鎯扮翻閸戠尨绱?
   private lastFetchContext: {
     kind: string;
     url: string;
@@ -176,7 +206,7 @@ export class ApiClient {
       const ts = new Date().toISOString();
       // Shallow clone and mask sensitive headers
       const safeHeaders: Record<string, string> = { ...headers };
-      const mask = (v: string) => (typeof v === 'string' && v.length > 12) ? `${v.slice(0, 6)}…${v.slice(-4)}` : '***';
+      const mask = (v: string) => (typeof v === 'string' && v.length > 12) ? `${v.slice(0, 6)}...${v.slice(-4)}` : '***';
       if (safeHeaders['Authorization']) {
         safeHeaders['Authorization'] = mask(safeHeaders['Authorization']);
       }
@@ -187,7 +217,7 @@ export class ApiClient {
         safeHeaders['x-cursor-checksum'] = mask(safeHeaders['x-cursor-checksum']);
       }
 
-      // 生成请求体字符串
+      // 閻㈢喐鍨氱拠閿嬬湴娴ｆ挸鐡х粭锔胯�
       let bodyStr = '<none>';
       
       if (body !== null && body !== undefined) {
@@ -236,7 +266,7 @@ export class ApiClient {
         }
       }
 
-      // 保存请求上下文供错误时使用
+      // 娣囨繂鐡ㄧ拠閿嬬湴娑撳﹣绗呴弬鍥︾返闁挎瑨顕ら弮鏈靛▏??
       this.lastFetchContext = {
         kind,
         url,
@@ -260,33 +290,33 @@ export class ApiClient {
     try {
       const ts = new Date().toISOString();
       
-      // 成功响应只输出简要信息
+      // 閹存劕濮涢崫宥呯安閸欘亣绶�崙铏圭暆鐟曚椒淇??
       if (status >= 200 && status < 300) {
-        ApiClient.channel?.appendLine(`[${ts}] ✓ ${kind} → ${status}`);
+        ApiClient.channel?.appendLine(`[${ts}] ??${kind} ??${status}`);
         this.lastFetchContext = null;
         return;
       }
       
-      // 错误响应输出完整信息
+      // 闁挎瑨顕ら崫宥呯安鏉堟挸鍤�€瑰本鏆ｆ穱鈩冧紖
       ApiClient.channel?.appendLine('');
-      ApiClient.channel?.appendLine(`[${ts}] ❌ ${kind} FAILED`);
+      ApiClient.channel?.appendLine(`[${ts}] ??${kind} FAILED`);
       ApiClient.channel?.appendLine(`[${ts}] Response Status: ${status}`);
       
-      // 输出完整的请求信息
+      // 鏉堟挸鍤�€瑰本鏆ｉ惃鍕�嚞濮瑰倷淇??
       if (this.lastFetchContext) {
         ApiClient.channel?.appendLine(`[${ts}] Request URL: ${this.lastFetchContext.url}`);
         ApiClient.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(this.lastFetchContext.headers)}`);
         ApiClient.channel?.appendLine(`[${ts}] Request Body: ${this.lastFetchContext.body}`);
       }
       
-      // 输出响应头
+      // 鏉堟挸鍤�崫宥呯安??
       const responseHeaders: Record<string, string> = {};
       headers.forEach((value, key) => {
         responseHeaders[key] = value;
       });
       ApiClient.channel?.appendLine(`[${ts}] Response Headers: ${JSON.stringify(responseHeaders)}`);
 
-      // 输出响应体（如果有）
+      // 鏉堟挸鍤�崫宥呯安娴ｆ搫绱欐俊鍌涚亯閺堝�绱?
       if (body !== null && body !== undefined) {
         if ((body instanceof Uint8Array || ArrayBuffer.isView(body)) && isProto) {
           const bytes = body as Uint8Array;
@@ -335,13 +365,229 @@ export class ApiClient {
     }
   }
 
-  async streamCpp(request: StreamCppRequest, abortController?: AbortController): Promise<AsyncIterable<StreamCppResponse>> {
+  // Start a cursor-style streaming session and buffer results for polling
+  async streamCpp(
+    request: StreamCppRequest,
+    options: { generateUuid: string; startOfCpp: number; abortController?: AbortController }
+  ): Promise<void> {
     if (!this.aiClient) {
       throw new Error('AI client is not initialized');
     }
+    const startTs = Date.now();
+    const controller = options.abortController ?? new AbortController();
+    let aborted = false;
+    controller.signal.addEventListener('abort', () => {
+      aborted = true;
+    });
+    this.streams.push({
+      generationUUID: options.generateUuid,
+      abortController: controller,
+      startTime: performance.now?.() ?? 0,
+      modelInfo: undefined,
+      buffer: [],
+    });
 
-    const stream = this.aiClient.streamCpp(request, { signal: abortController?.signal }) as unknown as AsyncIterable<StreamCppResponse>;
-    return stream;
+    try {
+      // Enrich request to mirror cursor fields
+      const isDebug = (this.config.baseUrl?.includes('localhost') || this.config.baseUrl?.includes('lclhst.build')) ?? false;
+      // Ensure we carry over all fields from the original message
+      const enriched = StreamCppRequest.fromJson({
+        ...(typeof (request as any).toJson === 'function' ? (request as any).toJson() : {}),
+        giveDebugOutput: isDebug,
+        isDebug,
+        supportsCpt: true,
+        supportsCrlfCpt: true,
+        workspaceId: this.uniqueWorkspaceId,
+        timeSinceRequestStart: Math.max(0, Date.now() - options.startOfCpp),
+        timeAtRequestSend: Date.now(),
+        clientTimezoneOffset: new Date().getTimezoneOffset(),
+        contextItems: (request as any)?.contextItems ?? [],
+        filesyncUpdates: (request as any)?.filesyncUpdates ?? [],
+      });
+
+      // Emit explicit log of the proto->json body to the channel
+      try {
+        const json = enriched.toJson();
+        this.pendingRequestBodiesById.set(options.generateUuid, json);
+        const ts = new Date().toISOString();
+        ApiClient.channel?.appendLine(`[${ts}] StreamCpp (preflight) Request Body (proto->json): ${JSON.stringify(json)}`);
+      } catch {}
+
+      const iterable = (await this.aiClient.streamCpp(enriched, {
+        signal: controller.signal,
+        headers: { 'x-request-id': options.generateUuid },
+      })) as unknown as AsyncIterable<StreamCppResponse>;
+
+      (async () => {
+        try {
+          let chunkIndex = 0;
+          for await (const chunk of iterable) {
+            chunkIndex++;
+            
+            const s = this.streams.find((x) => x.generationUUID === options.generateUuid);
+            if (!s) {
+              aborted = true;
+              break;
+            }
+            // Map incoming chunk fields into buffer entries, mirroring cursor semantics
+            const anyChunk: any = chunk as any;
+            
+            // Detailed logging for debugging proto parsing issues
+            try {
+              const chunkFields: string[] = [];
+              if (anyChunk.modelInfo) chunkFields.push('modelInfo');
+              if (anyChunk.rangeToReplace) {
+                const rtr = anyChunk.rangeToReplace;
+                chunkFields.push(`range:L${rtr.startLineNumber}-${rtr.endLineNumberInclusive}`);
+              }
+              if (typeof anyChunk.text === 'string') {
+                chunkFields.push(`text(${anyChunk.text.length}chars)`);
+              }
+              if (anyChunk.beginEdit) chunkFields.push('beginEdit');
+              if (anyChunk.doneEdit) chunkFields.push('doneEdit');
+              if (anyChunk.doneStream) chunkFields.push('doneStream');
+              if (anyChunk.cursorPredictionTarget) chunkFields.push('cursorPredictionTarget');
+              if (anyChunk.bindingId) chunkFields.push(`bindingId:${anyChunk.bindingId}`);
+              
+              ApiClient.channel?.appendLine(
+                `[api] StreamCpp chunk #${chunkIndex} for ${options.generateUuid.slice(0,8)}: [${chunkFields.join(', ')}]`
+              );
+              
+              // Log full text content for text chunks (important for debugging)
+              if (typeof anyChunk.text === 'string' && anyChunk.text.length > 0) {
+                // Log text in chunks if very long
+                const textPreview = anyChunk.text.length > 200 
+                  ? `${anyChunk.text.slice(0, 100)}...${anyChunk.text.slice(-100)}`
+                  : anyChunk.text;
+                ApiClient.channel?.appendLine(
+                  `[api] StreamCpp chunk #${chunkIndex} TEXT FULL (${anyChunk.text.length} chars): "${textPreview.replace(/\n/g, '\\n')}"`
+                );
+              }
+            } catch {}
+            
+            if (anyChunk.modelInfo) {
+              s.modelInfo = anyChunk.modelInfo;
+            }
+            if (anyChunk.rangeToReplace) {
+              // Extract LineRange fields properly from proto message
+              const rtr = anyChunk.rangeToReplace;
+              s.buffer.push({
+                case: 'rangeToReplace',
+                rangeToReplaceOneIndexed: {
+                  startLineNumber: rtr.startLineNumber,
+                  endLineNumberInclusive: rtr.endLineNumberInclusive,
+                  shouldRemoveLeadingEol: anyChunk.shouldRemoveLeadingEol ?? false,
+                },
+                bindingId: anyChunk.bindingId,
+              });
+            }
+            if (typeof anyChunk.text === 'string' && anyChunk.text.length > 0) {
+              s.buffer.push(anyChunk.text as string);
+            }
+            if (anyChunk.cursorPredictionTarget) {
+              const cpt = anyChunk.cursorPredictionTarget;
+              ApiClient.channel?.appendLine(
+                `[api] ⭐⭐⭐ CURSOR_PREDICTION_TARGET RECEIVED ⭐⭐⭐`
+              );
+              ApiClient.channel?.appendLine(
+                `[api] 📍 CursorPrediction: path="${cpt.relativePath}", line=${cpt.lineNumberOneIndexed}, retrigger=${cpt.shouldRetriggerCpp}, expectedContent="${(cpt.expectedContent || '').slice(0, 50)}"`
+              );
+              s.buffer.push({
+                case: 'cursorPredictionTarget',
+                cursorPredictionTarget: anyChunk.cursorPredictionTarget,
+                bindingId: anyChunk.bindingId,
+              });
+            }
+            if (anyChunk.beginEdit) {
+              s.buffer.push({ case: 'beginEdit', beginEdit: true });
+            }
+            if (anyChunk.doneEdit) {
+              s.buffer.push({ case: 'doneEdit', doneEdit: true });
+            }
+            if (anyChunk.doneStream) {
+              // end of stream signalled by server
+              s.buffer.push(this.DONE_SENTINEL);
+              break;
+            }
+          }
+          ApiClient.channel?.appendLine(
+            `[api] StreamCpp stream completed for ${options.generateUuid.slice(0,8)}: ${chunkIndex} chunks received`
+          );
+        } catch (innerErr: any) {
+          // Log the error for debugging
+          ApiClient.channel?.appendLine(
+            `[api] StreamCpp stream error for ${options.generateUuid}: ${innerErr?.message ?? String(innerErr)}`
+          );
+          const s = this.streams.find((x) => x.generationUUID === options.generateUuid);
+          if (s) {
+            // Store error info for flushCpp to report
+            (s as any).streamError = innerErr?.message ?? String(innerErr);
+          }
+        } finally {
+          // Mark completion
+          const s = this.streams.find((x) => x.generationUUID === options.generateUuid);
+          if (s && !s.buffer.includes(this.DONE_SENTINEL)) {
+            s.buffer.push(this.DONE_SENTINEL);
+          }
+          this.succeeded.push(options.generateUuid);
+          this.succeeded = this.succeeded.slice(-20);
+          // add minimal event
+          this.cppEvents.unshift({
+            requestId: options.generateUuid,
+            timestamp: startTs,
+            modelName: (request as any)?.modelName ?? 'unspecified',
+            metrics: {},
+          });
+          if (this.cppEvents.length > 20) this.cppEvents = this.cppEvents.slice(0, 20);
+        }
+      })();
+    } catch (e: any) {
+      // Refresh on enhance calm like cursor
+      if (e?.message && String(e.message).includes('ENHANCE_YOUR_CALM')) {
+        ApiClient.channel?.appendLine(`[api] Refreshing client due to ENHANCE_YOUR_CALM for ${options.generateUuid}`);
+        this.initializeClients();
+      }
+      ApiClient.channel?.appendLine(`[api] Error starting streamCpp: ${e?.message ?? String(e)}`);
+    }
+  }
+
+  cancelCpp(requestId: string): void {
+    this.streams.find((t) => t.generationUUID === requestId)?.abortController.abort();
+    this.streams = this.streams.filter((t) => t.generationUUID !== requestId);
+    // GC old streams
+    this.streams = this.streams.filter((e) => (performance.now?.() ?? 0) - e.startTime < 8000);
+  }
+
+  flushCpp(requestId: string):
+    Promise<{ type: 'success'; buffer: Array<string | any>; modelInfo?: any } | { type: 'failure'; reason: string }>
+  {
+    const s = this.streams.find((t) => t.generationUUID === requestId);
+    if (!s) {
+      if (this.succeeded.includes(requestId)) {
+        return Promise.resolve({ type: 'success', buffer: [this.DONE_SENTINEL], modelInfo: undefined });
+      }
+      return Promise.resolve({ type: 'failure', reason: 'stream not found' });
+    }
+    // Check for stream error
+    const streamError = (s as any).streamError;
+    if (streamError) {
+      this.streams = this.streams.filter((t) => t.generationUUID !== requestId);
+      return Promise.resolve({ type: 'failure', reason: `stream error: ${streamError}` });
+    }
+    if ((performance.now?.() ?? 0) - (s.startTime ?? 0) > 10000) {
+      this.streams = this.streams.filter((t) => t.generationUUID !== requestId);
+      return Promise.resolve({ type: 'failure', reason: 'stream took too long' });
+    }
+    const buff = s.buffer;
+    s.buffer = [];
+    if (this.succeeded.includes(requestId)) {
+      this.streams = this.streams.filter((t) => t.generationUUID !== requestId);
+    }
+    return Promise.resolve({ type: 'success', buffer: buff, modelInfo: s.modelInfo });
+  }
+
+  async getCppReport(): Promise<{ events: any[] }> {
+    return { events: [...this.cppEvents].sort((a, b) => b.timestamp - a.timestamp) };
   }
 
   async streamNextCursorPrediction(
@@ -414,7 +660,7 @@ export class ApiClient {
     return response;
   }
 
-  // Helper: 将 ReadableStream 转换为 AsyncIterable
+  // Helper: ??ReadableStream 鏉烆剚宕??AsyncIterable
   private async *streamToAsyncIterable<T>(
     stream: ReadableStream<Uint8Array>,
     factory: (json: unknown) => T
@@ -441,21 +687,21 @@ export class ApiClient {
     timestamp: string;
   } | null = null;
 
-  // Connect RPC 请求日志（仅保存上下文，不立即输出）
+  // Connect RPC 鐠囬攱鐪伴弮銉ョ箶閿涘牅绮庢穱婵嗙摠娑撳﹣绗呴弬鍥风礉娑撳秶鐝涢崡瀹犵翻閸戠尨绱?
   private async logConnectRequest(req: any) {
     try {
       const ts = new Date().toISOString();
       const url = req.url || 'unknown';
       
-      // 收集头部
+      // 閺€鍫曟肠婢舵挳鍎?
       const headers: Record<string, string> = {};
       req.header.forEach((value: string, key: string) => {
         headers[key] = value;
       });
 
-      // 掩码敏感信息
+      // 閹衡晝鐖滈弫蹇斿妳娣団剝浼?
       const safeHeaders = { ...headers };
-      const mask = (v: string) => (typeof v === 'string' && v.length > 12) ? `${v.slice(0, 6)}…${v.slice(-4)}` : '***';
+      const mask = (v: string) => (typeof v === 'string' && v.length > 12) ? `${v.slice(0, 6)}...${v.slice(-4)}` : '***';
       if (safeHeaders['authorization']) {
         safeHeaders['authorization'] = mask(safeHeaders['authorization']);
       }
@@ -463,7 +709,7 @@ export class ApiClient {
         safeHeaders['x-cursor-checksum'] = mask(safeHeaders['x-cursor-checksum']);
       }
 
-      // 记录请求体
+      // 鐠佹澘缍嶇拠閿嬬湴??
       let bodyStr = '<none>';
       if (req.message) {
         try {
@@ -473,19 +719,19 @@ export class ApiClient {
         }
       }
 
-      // 保存请求上下文供错误时使用
-      this.lastRequestContext = {
+      // 娣囨繂鐡ㄧ拠閿嬬湴娑撳﹣绗呴弬鍥风礄閹稿�顕�Ч鍌濈�闊�亷绱?
+      this.requestContextMap.set(req, {
         url,
         headers: safeHeaders,
         body: bodyStr,
-        timestamp: ts
-      };
+        timestamp: ts,
+      });
     } catch {
-      // 日志记录失败不应影响请求
+      // 閺冦儱绻旂拋鏉跨秿婢惰精瑙︽稉宥呯安瑜板崬鎼风拠閿嬬湴
     }
   }
 
-  // Connect RPC 响应日志（成功时输出详细上下文）
+  // Connect RPC 閸濆秴绨查弮銉ョ箶閿涘牊鍨氶崝鐔告�鏉堟挸鍤�拠锔剧矎娑撳﹣绗呴弬鍥风礆
   private async logConnectResponse(req: any, res: any) {
     try {
       const ts = new Date().toISOString();
@@ -495,54 +741,96 @@ export class ApiClient {
       const status = typeof res?.status === 'number' ? res.status : 200;
       const responseBody = safeSerialize(res?.message ?? res);
 
-      ApiClient.channel?.appendLine(`[${ts}] ✓ ${method} → ${status} OK`);
-      if (this.lastRequestContext) {
-        ApiClient.channel?.appendLine(`[${ts}]   Request URL: ${this.lastRequestContext.url}`);
-        ApiClient.channel?.appendLine(`[${ts}]   Request Headers: ${JSON.stringify(this.lastRequestContext.headers)}`);
-        ApiClient.channel?.appendLine(`[${ts}]   Request Body (proto->json): ${this.lastRequestContext.body}`);
+      ApiClient.channel?.appendLine(`[${ts}] ${method} -> ${status} OK`);
+      const ctx = this.requestContextMap.get(req);
+      if (ctx) {
+        ApiClient.channel?.appendLine(`[${ts}]   Request URL: ${ctx.url}`);
+        ApiClient.channel?.appendLine(`[${ts}]   Request Headers: ${JSON.stringify(ctx.headers)}`);
+        ApiClient.channel?.appendLine(`[${ts}]   Request Body (proto->json): ${ctx.body}`);
       } else {
-        ApiClient.channel?.appendLine(`[${ts}]   Request context unavailable (possibly streaming body)`);
+        const reason = getMissingContextReason(req, res);
+        ApiClient.channel?.appendLine(`[${ts}]   Request context unavailable: ${reason}`);
       }
       ApiClient.channel?.appendLine(`[${ts}]   Response Body (proto->json): ${responseBody}`);
 
-      // 清除请求上下文
-      this.lastRequestContext = null;
+      // 濞撳懘娅庣拠閿嬬湴娑撳﹣绗呴弬?
+      this.requestContextMap.delete(req);
     } catch {
-      // 日志记录失败不应影响响应
+      // 閺冦儱绻旂拋鏉跨秿婢惰精瑙︽稉宥呯安瑜板崬鎼烽崫宥呯安
     }
   }
 
-  // Connect RPC 错误日志（输出完整的请求上下文）
+  // Connect RPC 濞翠礁绱￠崫宥呯安閺冦儱绻旈敍鍫濐嚠濮ｅ繋閲滈崚鍡欏�鏉堟挸鍤�敍?
+    // Connect RPC streaming logging (per chunk)
+  private wrapStreamingResponseWithLogging<T>(req: any, source: AsyncIterable<T>): AsyncIterable<T> {
+    const url = req.url || 'unknown';
+    const method = url.split('/').pop() || 'unknown';
+    const startTs = new Date().toISOString();
+
+    // stream start
+    ApiClient.channel?.appendLine(`[${startTs}] ${method} -> 200 OK (stream started)`);
+    const startCtx = this.requestContextMap.get(req);
+    if (startCtx) {
+      ApiClient.channel?.appendLine(`[${startTs}]   Request URL: ${startCtx.url}`);
+      ApiClient.channel?.appendLine(`[${startTs}]   Request Headers: ${JSON.stringify(startCtx.headers)}`);
+      ApiClient.channel?.appendLine(`[${startTs}]   Request Body (proto->json): ${startCtx.body}`);
+    } else {
+      const reason = getMissingContextReason(req, undefined);
+      ApiClient.channel?.appendLine(`[${startTs}]   Request context unavailable: ${reason}`);
+    }
+    this.requestContextMap.delete(req);
+
+    const self = this;
+    async function* generator() {
+      let index = 0;
+      try {
+        for await (const chunk of source as AsyncIterable<any>) {
+          index += 1;
+          const ts = new Date().toISOString();
+          const body = safeSerialize((chunk as any)?.message ?? chunk);
+          ApiClient.channel?.appendLine(`[${ts}]   Stream chunk #${index} (proto->json): ${body}`);
+          yield chunk as T;
+        }
+        const endTs = new Date().toISOString();
+        ApiClient.channel?.appendLine(`[${endTs}] ${method} stream completed (${index} chunk${index === 1 ? '' : 's'})`);
+      } catch (err) {
+        const ts = new Date().toISOString();
+        ApiClient.channel?.appendLine(`[${ts}] ${method} stream error: ${err instanceof Error ? err.message : String(err)}`);
+        await self.logConnectError(req, err);
+        throw err;
+      }
+    }
+
+    return generator();
+  }
+    // Connect RPC 错误日志（输出完整的请求上下文）
   private async logConnectError(req: any, error: any) {
     try {
       const ts = new Date().toISOString();
       const url = req.url || 'unknown';
       const method = url.split('/').pop() || 'unknown';
-      
-      // 输出错误标题
+
       ApiClient.channel?.appendLine('');
-      ApiClient.channel?.appendLine(`[${ts}] ❌ ${method} FAILED`);
-      ApiClient.channel?.appendLine(`[${ts}] Error: ${error.message || String(error)}`);
-      if (error.code) {
-        ApiClient.channel?.appendLine(`[${ts}] Error Code: ${error.code}`);
+      ApiClient.channel?.appendLine(`[${ts}] ${method} FAILED`);
+      ApiClient.channel?.appendLine(`[${ts}] Error: ${error?.message || String(error)}`);
+      if ((error as any)?.code) {
+        ApiClient.channel?.appendLine(`[${ts}] Error Code: ${(error as any).code}`);
       }
-      
+
       // 输出完整的请求信息
-      if (this.lastRequestContext) {
-        ApiClient.channel?.appendLine(`[${ts}] Request URL: ${this.lastRequestContext.url}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(this.lastRequestContext.headers)}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Body (proto->json): ${this.lastRequestContext.body}`);
+      const errCtx = this.requestContextMap.get(req);
+      if (errCtx) {
+        ApiClient.channel?.appendLine(`[${ts}] Request URL: ${errCtx.url}`);
+        ApiClient.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(errCtx.headers)}`);
+        ApiClient.channel?.appendLine(`[${ts}] Request Body (proto->json): ${errCtx.body}`);
       }
-      
+
       ApiClient.channel?.appendLine('');
-      
-      // 清除请求上下文
-      this.lastRequestContext = null;
+      this.requestContextMap.delete(req);
     } catch {
       // 日志记录失败不应影响错误处理
     }
   }
-
   getEndpointInfo(): { baseUrl: string; isDefaultUrl: boolean } {
     const isDefaultUrl = this.config.baseUrl === DEFAULT_BASE_URL;
     return {
@@ -620,6 +908,29 @@ function safeSerialize(value: unknown, maxLength = 4000): string {
     return text;
   } catch {
     return '<unserializable>';
+  }
+}
+function getMissingContextReason(this: any, req: any, res: any): string {
+  try {
+    if (isAsyncIterable(res)) {
+      return 'server-streaming response; context logged at stream start';
+    }
+    if (req?.body && typeof req.body.getReader === 'function') {
+      return 'streaming request body (ReadableStream)';
+    }
+    if (!req?.message && !req?.body) {
+      return 'transport did not expose request message/body';
+    }
+    return 'request serialization skipped or failed';
+  } catch {
+    return 'unknown transport condition';
+  }
+}
+function isAsyncIterable(value: any): value is AsyncIterable<unknown> {
+  try {
+    return value !== null && typeof value[Symbol.asyncIterator] === 'function';
+  } catch {
+    return false;
   }
 }
 

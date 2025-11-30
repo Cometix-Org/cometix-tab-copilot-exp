@@ -34,11 +34,73 @@
       {
         "command": "cometix-tab.goToCursorPrediction",
         "title": "Cursor Tab: Go To Cursor Prediction"
+      },
+      {
+        "command": "cometix-tab.selectEndpointMode",
+        "title": "Cometix Tab: Select Endpoint Mode"
+      },
+      {
+        "command": "cometix-tab.selectRegion",
+        "title": "Cometix Tab: Select Server Region"
+      },
+      {
+        "command": "cometix-tab.showEndpointInfo",
+        "title": "Cometix Tab: Show Current Endpoint Info"
+      },
+      {
+        "command": "cometix-tab.refreshAutoEndpoint",
+        "title": "Cometix Tab: Refresh Auto-Selected Endpoint"
+      },
+      {
+        "command": "cometix-tab.toggleEnabled",
+        "title": "Cometix Tab: Toggle Enabled",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "cometix-tab.showStatusMenu",
+        "title": "Cometix Tab: Show Status Menu"
+      },
+      {
+        "command": "cometix-tab.showLogs",
+        "title": "Cometix Tab: Show Logs"
+      },
+      {
+        "command": "cometix-tab.manualTriggerCompletion",
+        "title": "Cometix Tab: Trigger Completion"
+      },
+      {
+        "command": "cometix-tab.showSnoozePicker",
+        "title": "Cometix Tab: Snooze Completions"
+      },
+      {
+        "command": "cometix-tab.cancelSnooze",
+        "title": "Cometix Tab: Cancel Snooze"
+      },
+      {
+        "command": "cometix-tab.showServerConfig",
+        "title": "Cometix Tab: Show Server Configuration"
+      },
+      {
+        "command": "cometix-tab.enableProposedApi",
+        "title": "Cometix Tab: Enable Proposed API"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "cometix-tab.manualTriggerCompletion",
+        "key": "alt+\\",
+        "mac": "option+\\",
+        "when": "editorTextFocus && !editorReadonly"
       }
     ],
     "configuration": {
       "title": "Cometix Tab",
       "properties": {
+        "cometixTab.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch to enable/disable Cometix Tab entirely."
+        },
         "cometixTab.enableInlineSuggestions": {
           "type": "boolean",
           "default": true,
@@ -62,10 +124,47 @@
           "default": [],
           "description": "List of VS Code language identifiers where inline suggestions should be disabled."
         },
+        "cometixTab.endpointMode": {
+          "type": "string",
+          "enum": [
+            "official",
+            "auto",
+            "custom"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Use official Cursor endpoints with manual region selection",
+            "Automatically select the best endpoint via server response",
+            "Use a custom user-provided endpoint URL"
+          ],
+          "description": "How to select the API endpoint for code completion."
+        },
+        "cometixTab.officialRegion": {
+          "type": "string",
+          "enum": [
+            "default",
+            "us",
+            "eu",
+            "asia"
+          ],
+          "default": "default",
+          "enumDescriptions": [
+            "Default endpoint (api4.cursor.sh)",
+            "United States (us.gcpp.cursor.sh)",
+            "Europe (eu.gcpp.cursor.sh)",
+            "Asia Pacific (asia.gcpp.cursor.sh)"
+          ],
+          "description": "Region for official Cursor endpoints. Only used when endpointMode is 'official'."
+        },
+        "cometixTab.customEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Custom endpoint URL. Only used when endpointMode is 'custom'."
+        },
         "cometixTab.serverUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional override for the official Cursor API base URL."
+          "markdownDescription": "**[Deprecated]** Use `#cometixTab.endpointMode#` and `#cometixTab.customEndpoint#` instead. This field is kept for backward compatibility."
         },
         "cometixTab.authToken": {
           "type": "string",
@@ -140,6 +239,7 @@
     "@types/vscode": "^1.106.1",
     "@vscode/test-cli": "^0.0.12",
     "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.27.0",
     "eslint": "^9.39.1",
     "npm-run-all": "^4.1.5",
@@ -149,7 +249,8 @@
   "dependencies": {
     "@bufbuild/protobuf": "^1.10.1",
     "@connectrpc/connect": "^1.6.1",
-    "@connectrpc/connect-node": "^1.6.1"
+    "@connectrpc/connect-node": "^1.6.1",
+    "@vscode/sudo-prompt": "^9.3.1"
   },
   "packageManager": "pnpm@10.18.3+sha512.bbd16e6d7286fd7e01f6b3c0b3c932cda2965c06a908328f74663f10a9aea51f1129eea615134bf992831b009eabe167ecb7008b597f40ff9bc75946aadfb08d"
 }

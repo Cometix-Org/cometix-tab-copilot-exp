@@ -35,6 +35,7 @@ export class ConfigService implements vscode.Disposable, IConfigService {
   private readConfig(): CursorFeatureFlags {
     const cfg = vscode.workspace.getConfiguration('cometixTab');
     return {
+      enabled: cfg.get<boolean>('enabled', true),
       enableInlineSuggestions: cfg.get<boolean>('enableInlineSuggestions', true),
       enableCursorPrediction: cfg.get<boolean>('enableCursorPrediction', true),
       enableDiagnosticsHints: cfg.get<boolean>('enableDiagnosticsHints', false),

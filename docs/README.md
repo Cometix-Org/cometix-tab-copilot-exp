@@ -32,6 +32,11 @@ Cometix Tab 是一个 VS Code 扩展，通过调用 Cursor 的后端 API，为 V
    - 增量更新优化
    - 自动版本管理
 
+4. **Proposed API 自动配置**
+   - 启动时检测 API 提案状态
+   - 自动修改 product.json
+   - 支持管理员权限提升
+
 ## 技术栈
 
 - **语言**: TypeScript
@@ -44,3 +49,4 @@ Cometix Tab 是一个 VS Code 扩展，通过调用 Cursor 的后端 API，为 V
 - [配置选项](./SERVICES.md#配置服务-configservice)
 - [API 端点列表](./CURSOR-API.md#端点列表)
 - [状态机工作原理](./COMPLETION-FLOW.md#状态机)
+- [Proposed API 配置](./SERVICES.md#productjson-修补器-productjsonpatcher)

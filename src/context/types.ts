@@ -1,4 +1,6 @@
 export interface CursorFeatureFlags {
+  /** Master switch - disables all functionality when false */
+  readonly enabled: boolean;
   readonly enableInlineSuggestions: boolean;
   readonly enableCursorPrediction: boolean;
   readonly enableDiagnosticsHints: boolean;

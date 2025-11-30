@@ -19,6 +19,7 @@
 | `workspaceStorage` | `IWorkspaceStorage` | 工作区持久存储 |
 | `cursorStateMachine` | - | 核心状态机 |
 | `cursorPrediction` | `ICursorPredictionController` | 光标预测控制 |
+| `productJsonPatcher` | - | Proposed API 配置工具 |
 
 ---
 
@@ -443,6 +444,89 @@ interface ICursorPredictionController extends vscode.Disposable {
 独立的 `StreamNextCursorPrediction` RPC 已废弃。光标预测现在通过融合模型在 `StreamCppResponse.cursorPredictionTarget` 中返回。
 
 **依赖**: `IDocumentTracker`, `IRpcClient`, `IConfigService`, `ILogger`, `IFileSyncCoordinator`
+
+---
+
+### Product.json 修补器 (ProductJsonPatcher)
+
+**文件**: `services/productJsonPatcher.ts`
+
+**导出函数**:
+```typescript
+// 启动时检查并提示用户启用 Proposed API
+function checkAndPromptProposedApiOnStartup(
+  context: vscode.ExtensionContext,
+  extensionId: string,
+  proposals: string[],
+  logger: ILogger
+): Promise<void>;
+
+// 检查 API 提案是否已启用
+function checkApiProposals(
+  extensionId: string,
+  proposals: string[]
+): Promise<{ ok: boolean; path?: string; reason?: string }>;
+
+// 重置忽略状态
+function resetIgnoreProposalCheck(
+  context: vscode.ExtensionContext
+): Promise<void>;
+```
+
+**职责**:
+- 启动时检测 VS Code Proposed API 是否已启用
+- 自动修改 `product.json` 启用所需 API 提案
+- 支持普通权限和管理员权限两种修改方式
+- 管理用户的「不再提示」偏好设置
+
+**工作流程**:
+
+```
+扩展激活
+    │
+    ├── 检查用户是否选择「不再提示」──→ 跳过检查
+    │
+    └── checkApiProposals()
+            │
+            ├── 已启用 ──→ 返回（无需操作）
+            │
+            └── 未启用 ──→ 显示提示对话框
+                    │
+                    ├── 「启用（需要管理员权限）」
+                    │       │
+                    │       ├── tryNormalPatch() ──→ 成功 ──→ 显示重启按钮
+                    │       │
+                    │       └── 权限不足 ──→ tryElevatedPatch()
+                    │               │
+                    │               └── 使用 sudo-prompt 提权 ──→ 显示重启按钮
+                    │
+                    ├── 「稍后提醒」──→ 下次启动再提示
+                    │
+                    └── 「不再提示」──→ 保存偏好，不再提示
+```
+
+**product.json 修改位置**:
+```typescript
+// 候选路径（按优先级）
+const candidates = [
+  path.join(appRoot, 'product.json'),
+  path.join(appRoot, 'resources', 'app', 'product.json'),
+  path.join(path.dirname(appRoot), 'resources', 'app', 'product.json'),
+];
+```
+
+**修改内容**:
+```json
+{
+  "extensionEnabledApiProposals": {
+    "Haleclipse.cometix-tab": ["inlineCompletionsAdditions"]
+  }
+}
+```
+
+**依赖**: `ILogger`, `vscode.ExtensionContext`, `@vscode/sudo-prompt`
+
+**相关命令**: `cometix-tab.enableProposedApi`
 
 ---
 

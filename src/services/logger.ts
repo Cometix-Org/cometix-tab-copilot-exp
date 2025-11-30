@@ -28,6 +28,13 @@ export class Logger implements vscode.Disposable, ILogger {
     this.channel.appendLine(`[${ts}] [${level}] ${text}`);
   }
 
+  /**
+   * Show the output channel
+   */
+  show(): void {
+    this.channel.show(true);
+  }
+
   dispose(): void {
     this.channel.dispose();
   }

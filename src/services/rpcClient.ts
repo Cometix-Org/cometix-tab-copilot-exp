@@ -82,25 +82,40 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
     return response;
   }
 
+  async getCppConfig(): Promise<any> {
+    this.logger.info('[rpc] CppConfig request');
+    const response = await this.client.getCppConfig();
+    this.logger.info(`[rpc] CppConfig response: ${this.stringifyPayload(response)}`);
+    return response;
+  }
+
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
   }
 
+  /**
+   * Refresh the API client with current configuration
+   * Called when endpoint settings change
+   */
+  refreshClient(): void {
+    this.logger.info('Refreshing Cursor RPC client due to configuration change');
+    this.client = this.createClient();
+  }
+
   private createClient(): ApiClient {
     const config = vscode.workspace.getConfiguration('cometixTab');
-    const rawBaseUrl = config.get<string>('serverUrl') ?? '';
-    const baseUrl = rawBaseUrl.trim().length > 0 ? rawBaseUrl.trim() : undefined;
+    
+    // Let ApiClient handle endpoint resolution based on mode
+    // Only pass override values if explicitly set
     const authToken = config.get<string>('authToken') ?? '';
     const clientKey = config.get<string>('clientKey') ?? '';
 
     const finalConfig: Partial<ApiClientConfig> = {
-      baseUrl,
       authToken,
       clientKey,
     };
 
-    const endpointLabel = baseUrl ?? 'default official endpoint';
-    this.logger.info(`Initialising Cursor RPC client for ${endpointLabel}`);
+    this.logger.info(`Initialising Cursor RPC client with endpoint mode: ${config.get<string>('endpointMode') || 'auto'}`);
     return new ApiClient(finalConfig);
   }
 

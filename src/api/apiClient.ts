@@ -1,7 +1,18 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { getOrGenerateClientKey } from '../utils/checksum';
-import { DEFAULT_BASE_URL, EndpointKey, getEndpointUrl } from './endpoints';
+import { 
+  DEFAULT_BASE_URL, 
+  EndpointKey, 
+  getEndpointUrl,
+  EndpointMode,
+  OfficialRegion,
+  getRegionEndpoint,
+  OFFICIAL_ENDPOINTS,
+  DEFAULT_CPP_CONFIG_URL,
+  normalizeToApi2,
+  isOfficialEndpoint,
+} from './endpoints';
 import { 
   StreamCppRequest, 
   StreamCppResponse,
@@ -61,21 +72,20 @@ export class ApiClient {
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
     const vscodeConfig = vscode.workspace.getConfiguration('cometixTab');
 
-    const customBaseUrl = override?.baseUrl || vscodeConfig.get<string>('serverUrl');
-
-    // 如果用户提供了自定义 URL，直接使用；否则使用默认官方 URL
+    // Resolve base URL based on endpoint mode
     let baseUrl: string;
-    if (!customBaseUrl || customBaseUrl.trim() === '') {
-      baseUrl = DEFAULT_BASE_URL;
+    if (override?.baseUrl && override.baseUrl.trim() !== '') {
+      // Direct override takes highest priority
+      baseUrl = override.baseUrl;
     } else {
-      baseUrl = customBaseUrl;
+      baseUrl = this.resolveBaseUrl(vscodeConfig);
     }
 
-    // 婵″倹鐏夊▽鈩冩箒鐎广垺鍩涚粩顖氱槕闁姐儻绱濋懛顏勫З閻㈢喐鍨氭稉鈧??
+    // Auto-generate client key if not provided
     let clientKey = override?.clientKey || vscodeConfig.get<string>('clientKey') || '';
     if (!clientKey || clientKey.trim() === '') {
       clientKey = getOrGenerateClientKey();
-      // 娣囨繂鐡ㄩ悽鐔稿灇閻ㄥ嫬顓归幋椋庮伂鐎靛棝鎸滈崚浼村帳缂冾喕鑵?
+      // Save auto-generated client key to global config
       vscodeConfig.update('clientKey', clientKey, vscode.ConfigurationTarget.Global);
     }
 
@@ -84,6 +94,49 @@ export class ApiClient {
       authToken: override?.authToken || vscodeConfig.get<string>('authToken') || '',
       clientKey
     };
+  }
+
+  /**
+   * Resolve base URL based on endpoint mode configuration
+   * This method determines which endpoint to use based on user settings
+   */
+  private resolveBaseUrl(vscodeConfig: vscode.WorkspaceConfiguration): string {
+    const endpointMode = (vscodeConfig.get<string>('endpointMode') || 'auto') as EndpointMode;
+    
+    switch (endpointMode) {
+      case 'official': {
+        // Use official endpoint with selected region
+        const region = (vscodeConfig.get<string>('officialRegion') || 'default') as OfficialRegion;
+        const geoCppUrl = getRegionEndpoint(region);
+        // For Connect RPC we need to use api2 format (HTTP/1.1)
+        // The geoCpp URL is mainly for reference; actual streaming will use normalized URL
+        ApiClient.channel?.appendLine(`[config] Using official endpoint: region=${region}, url=${geoCppUrl}`);
+        return normalizeToApi2(geoCppUrl);
+      }
+      
+      case 'custom': {
+        // Use custom endpoint
+        const customEndpoint = vscodeConfig.get<string>('customEndpoint') || '';
+        const serverUrl = vscodeConfig.get<string>('serverUrl') || ''; // deprecated fallback
+        const customUrl = (customEndpoint.trim() || serverUrl.trim());
+        
+        if (customUrl) {
+          ApiClient.channel?.appendLine(`[config] Using custom endpoint: ${customUrl}`);
+          // Normalize to api2 if it's an official URL (for HTTP/1.1 compatibility)
+          return isOfficialEndpoint(customUrl) ? normalizeToApi2(customUrl) : customUrl;
+        }
+        // Fall through to auto if no custom URL set
+        ApiClient.channel?.appendLine(`[config] Custom endpoint not set, falling back to auto`);
+      }
+      // fallthrough intentional
+      
+      case 'auto':
+      default: {
+        // Use default official endpoint (auto-detection happens at runtime via CppConfig)
+        ApiClient.channel?.appendLine(`[config] Using auto endpoint mode, default: ${DEFAULT_BASE_URL}`);
+        return DEFAULT_BASE_URL;
+      }
+    }
   }
 
   private initializeClients() {

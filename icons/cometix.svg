@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+  <!-- Main comet body - a stylized cursor/tab shape with sparkle -->
+  <path d="M3 2.5L13 8L3 13.5V2.5Z" fill-opacity="0.9"/>
+  <!-- Sparkle accent -->
+  <circle cx="12" cy="4" r="1.2" fill-opacity="0.8"/>
+  <path d="M12 2.5V3.5M12 4.5V5.5M10.5 4H11.5M12.5 4H13.5" stroke="currentColor" stroke-width="0.5" stroke-linecap="round" fill="none"/>
+</svg>

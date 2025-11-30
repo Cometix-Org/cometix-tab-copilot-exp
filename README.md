@@ -27,6 +27,12 @@ Cometix Tab 是一个 VS Code 扩展，将 Cursor 编辑器的智能代码补全
 - **自动版本管理**：追踪文件版本，确保一致性
 - **智能回退**：版本漂移过大时自动全量同步
 
+### Proposed API 自动配置
+
+- **启动检测**：自动检测 VS Code Proposed API 是否已启用
+- **权限提升**：支持管理员权限修改 product.json
+- **一键配置**：无需手动编辑配置文件
+
 ## 安装
 
 ### 前置要求
@@ -118,6 +124,7 @@ code --install-extension cometix-tab-0.0.1.vsix
 | `Cursor Tab: Accept Inline Suggestion` | 接受当前内联建议 |
 | `Cursor Tab: Apply Next Edit` | 应用队列中的下一个编辑 |
 | `Cursor Tab: Go To Cursor Prediction` | 跳转到预测的光标位置 |
+| `Cometix Tab: Enable Proposed API` | 启用 VS Code Proposed API |
 
 ## 技术文档
 
@@ -128,6 +135,26 @@ code --install-extension cometix-tab-0.0.1.vsix
 - [系统架构](./docs/ARCHITECTURE.md) - 模块划分和数据流
 - [服务详解](./docs/SERVICES.md) - 依赖注入服务说明
 - [补全流程](./docs/COMPLETION-FLOW.md) - 代码补全完整流程
+
+## Proposed API 配置
+
+Cometix Tab 使用 VS Code 的 Proposed API (`inlineCompletionsAdditions`) 来提供完整功能。
+
+### 自动配置
+
+首次启动时，扩展会自动检测并提示您启用 Proposed API：
+
+1. 弹出提示框询问是否启用
+2. 选择「启用（需要管理员权限）」
+3. 在系统对话框中确认权限请求
+4. 重启 VS Code 生效
+
+### 手动配置
+
+如果您选择了「不再提示」，可以通过命令重新触发：
+
+1. 按 `Ctrl+Shift+P` 打开命令面板
+2. 搜索并执行 `Cometix Tab: Enable Proposed API`
 
 ## 开发
 
@@ -174,6 +201,7 @@ pnpm run package
 - `@bufbuild/protobuf` - Protobuf 序列化
 - `@connectrpc/connect` - Connect RPC 客户端
 - `@connectrpc/connect-node` - Node.js 传输层
+- `@vscode/sudo-prompt` - 权限提升支持
 
 ## 许可证
 

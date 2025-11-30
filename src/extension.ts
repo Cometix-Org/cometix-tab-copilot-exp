@@ -12,6 +12,7 @@ import { CursorPredictionController } from './controllers/cursorPredictionContro
 import { FilesyncUpdatesStore } from './services/filesyncUpdatesStore';
 import { registerNextEditCommand } from './commands/nextEditCommand';
 import { registerCursorPredictionCommand } from './commands/cursorPredictionCommand';
+import { registerEndpointCommands } from './commands/endpointCommands';
 // New services for enhanced functionality
 import { DebounceManager } from './services/debounceManager';
 import { RecentFilesTracker } from './services/recentFilesTracker';
@@ -19,7 +20,14 @@ import { TelemetryService } from './services/telemetryService';
 import { LspSuggestionsTracker } from './services/lspSuggestionsTracker';
 import { WorkspaceStorage } from './services/workspaceStorage';
 import { DiagnosticsTracker } from './services/diagnosticsTracker';
+import { EndpointManager } from './services/endpointManager';
 import { TriggerSource } from './context/types';
+// UI components
+import { StatusBar } from './ui/statusBar';
+import { MenuPanel, showSnoozePicker } from './ui/menuPanel';
+import { SnoozeService } from './services/snoozeService';
+import { ServerConfigService } from './services/serverConfigService';
+import { checkAndPromptProposedApiOnStartup, resetIgnoreProposalCheck } from './services/productJsonPatcher';
 
 export function activate(context: vscode.ExtensionContext) {
 	const container = new ServiceContainer(context);
@@ -103,7 +111,138 @@ export function activate(context: vscode.ExtensionContext) {
 	registerNextEditCommand(stateMachine, logger, context.subscriptions);
 	registerCursorPredictionCommand(logger, context.subscriptions);
 
+	// Endpoint manager for API endpoint selection
+	const endpointManager = new EndpointManager(context);
+	context.subscriptions.push(endpointManager);
+
+	// Get RpcClient for refresh callback
+	const rpcClient = container.resolve<RpcClient>('rpcClient');
+	
+	// Register endpoint commands
+	const endpointCommandDisposables = registerEndpointCommands(
+		context,
+		endpointManager,
+		() => rpcClient.refreshClient()
+	);
+	context.subscriptions.push(...endpointCommandDisposables);
+
+	// Listen for endpoint changes and refresh client
+	context.subscriptions.push(
+		endpointManager.onEndpointChanged((resolved) => {
+			logger.info(`[Extension] Endpoint changed: mode=${resolved.mode}, url=${resolved.geoCppUrl}`);
+			rpcClient.refreshClient();
+		})
+	);
+
+	// Initialize UI components
+	const snoozeService = SnoozeService.getInstance();
+	const serverConfigService = ServerConfigService.getInstance();
+	const statusBar = new StatusBar();
+	const menuPanel = new MenuPanel();
+
+	context.subscriptions.push(snoozeService);
+	context.subscriptions.push(serverConfigService);
+	context.subscriptions.push(statusBar);
+
+	// Register new commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.toggleEnabled', async () => {
+			const config = vscode.workspace.getConfiguration('cometixTab');
+			const currentEnabled = config.get<boolean>('enabled', true);
+			await config.update('enabled', !currentEnabled, vscode.ConfigurationTarget.Global);
+			vscode.window.showInformationMessage(
+				`Cometix Tab: ${!currentEnabled ? 'Enabled' : 'Disabled'}`
+			);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.showStatusMenu', () => {
+			menuPanel.show();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.showLogs', () => {
+			logger.show();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.manualTriggerCompletion', () => {
+			const editor = vscode.window.activeTextEditor;
+			if (editor) {
+				const config = vscode.workspace.getConfiguration('cometixTab');
+				if (!config.get<boolean>('enabled', true)) {
+					vscode.window.showWarningMessage('Cometix Tab is disabled');
+					return;
+				}
+				if (snoozeService.isSnoozing()) {
+					vscode.window.showWarningMessage(`Cometix Tab is snoozed for ${snoozeService.getRemainingMinutes()} more minutes`);
+					return;
+				}
+				inlineEditTriggerer.manualTrigger(editor.document, editor.selection.active, TriggerSource.ManualTrigger);
+				logger.info('[Extension] Manual completion triggered via Alt+\\');
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.showSnoozePicker', () => {
+			showSnoozePicker();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.cancelSnooze', () => {
+			snoozeService.cancelSnooze();
+			vscode.window.showInformationMessage('Cometix Tab: Snooze cancelled');
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.showServerConfig', () => {
+			serverConfigService.showConfig();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.enableProposedApi', async () => {
+			// Reset ignore state and trigger check
+			await resetIgnoreProposalCheck(context);
+			const extId = 'Haleclipse.cometix-tab';
+			const proposals = ['inlineCompletionsAdditions'];
+			await checkAndPromptProposedApiOnStartup(context, extId, proposals, logger);
+		})
+	);
+
+	// Fetch server config on activation
+	fetchAndCacheServerConfig(rpcClient, serverConfigService, logger);
+
+	// Check and prompt for proposed API on startup (non-blocking)
+	// Extension ID format: publisher.name
+	const extensionId = 'Haleclipse.cometix-tab';
+	const requiredProposals = ['inlineCompletionsAdditions'];
+	checkAndPromptProposedApiOnStartup(context, extensionId, requiredProposals, logger);
+
 	logger.info('Cometix Tab extension activated');
+}
+
+/**
+ * Fetch CppConfig from server and cache it
+ */
+async function fetchAndCacheServerConfig(
+	rpcClient: RpcClient,
+	serverConfigService: ServerConfigService,
+	logger: Logger
+): Promise<void> {
+	try {
+		const response = await rpcClient.getCppConfig();
+		serverConfigService.updateFromResponse(response);
+		logger.info('[Extension] Server config fetched and cached');
+	} catch (err) {
+		logger.warn(`[Extension] Failed to fetch server config: ${err}`);
+	}
 }
 
 export function deactivate() {}

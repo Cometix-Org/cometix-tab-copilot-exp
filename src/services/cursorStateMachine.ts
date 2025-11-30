@@ -159,6 +159,11 @@ export class CursorStateMachine implements vscode.Disposable {
   
   /** Inline edit triggerer for auto-triggering suggestions */
   private readonly inlineEditTriggerer: InlineEditTriggerer;
+  
+  /** Pending trigger source from InlineEditTriggerer - used when VS Code calls provideInlineCompletionItems */
+  private pendingTriggerSource?: TriggerSource;
+  private pendingTriggerTimestamp = 0;
+  private readonly pendingTriggerMaxAgeMs = 500; // Max age for pending trigger
 
   constructor(
     private readonly tracker: IDocumentTracker,
@@ -183,6 +188,12 @@ export class CursorStateMachine implements vscode.Disposable {
     
     // Initialize inline edit triggerer
     this.inlineEditTriggerer = new InlineEditTriggerer(logger);
+    
+    // Wire up InlineEditTriggerer to store pending trigger source
+    this.inlineEditTriggerer.onTrigger(({ triggerSource }) => {
+      this.pendingTriggerSource = triggerSource;
+      this.pendingTriggerTimestamp = Date.now();
+    });
     
     // Listen to cursor movement to clear prediction flag
     vscode.window.onDidChangeTextEditorSelection(() => {
@@ -714,7 +725,31 @@ export class CursorStateMachine implements vscode.Disposable {
       // Record rejection for InlineEditTriggerer cooldown
       this.recordRejection();
       this.cleanupRequest(requestId, bindingId);
+    } else if (reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Accepted) {
+      // User accepted the completion - trigger a new completion with CursorPrediction source
+      // This matches Cursor's behavior of firing Ku.CursorPrediction after acceptance
+      this.lastAcceptedRequestId = requestId;
+      this.triggerCursorPrediction();
+      this.cleanupRequest(requestId, bindingId);
     }
+  }
+
+  /**
+   * Trigger a new completion with CursorPrediction source after user accepts a completion.
+   * This matches Cursor's behavior of automatically triggering a new request after acceptance.
+   */
+  private triggerCursorPrediction(): void {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      return;
+    }
+    
+    this.logger.info('[Cpp] Triggering CursorPrediction after acceptance');
+    this.inlineEditTriggerer.manualTrigger(
+      editor.document,
+      editor.selection.active,
+      TriggerSource.CursorPrediction
+    );
   }
 
   handleListEnd(
@@ -1275,11 +1310,24 @@ export class CursorStateMachine implements vscode.Disposable {
   /**
    * Derive TriggerSource from VS Code's InlineCompletionTriggerKind
    * Maps: Invoke → ManualTrigger, Automatic → Typing
+   * Also checks for pending trigger source from InlineEditTriggerer
    */
   private getTriggerSource(ctx: SuggestionContext): TriggerSource {
+    // First check if explicit trigger source was provided
     if (ctx.triggerSource) {
       return ctx.triggerSource;
     }
+    
+    // Check for pending trigger from InlineEditTriggerer (e.g., LinterErrors, ParameterHints)
+    if (this.pendingTriggerSource && 
+        Date.now() - this.pendingTriggerTimestamp < this.pendingTriggerMaxAgeMs) {
+      const source = this.pendingTriggerSource;
+      // Clear pending trigger after use
+      this.pendingTriggerSource = undefined;
+      return source;
+    }
+    
+    // Fallback to VS Code's triggerKind
     if (ctx.triggerKind === vscode.InlineCompletionTriggerKind.Invoke) {
       return TriggerSource.ManualTrigger;
     }

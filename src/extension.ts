@@ -18,6 +18,8 @@ import { RecentFilesTracker } from './services/recentFilesTracker';
 import { TelemetryService } from './services/telemetryService';
 import { LspSuggestionsTracker } from './services/lspSuggestionsTracker';
 import { WorkspaceStorage } from './services/workspaceStorage';
+import { DiagnosticsTracker } from './services/diagnosticsTracker';
+import { TriggerSource } from './context/types';
 
 export function activate(context: vscode.ExtensionContext) {
 	const container = new ServiceContainer(context);
@@ -38,6 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
 	container.registerSingleton('recentFilesTracker', (c) => new RecentFilesTracker(c.resolve('logger')));
 	container.registerSingleton('telemetryService', (c) => new TelemetryService(c.resolve('logger')));
 	container.registerSingleton('lspSuggestionsTracker', (c) => new LspSuggestionsTracker(c.resolve('logger')));
+	container.registerSingleton('diagnosticsTracker', (c) => new DiagnosticsTracker(c.resolve('logger')));
 	// Workspace storage for persisting workspaceId and controlToken
 	container.registerSingleton('workspaceStorage', () => new WorkspaceStorage(context));
 	
@@ -71,6 +74,29 @@ export function activate(context: vscode.ExtensionContext) {
 	const logger = container.resolve<Logger>('logger');
 	const stateMachine = container.resolve<CursorStateMachine>('cursorStateMachine');
 	container.resolve<CursorPredictionController>('cursorPrediction');
+	const diagnosticsTracker = container.resolve<DiagnosticsTracker>('diagnosticsTracker');
+	const lspSuggestionsTracker = container.resolve<LspSuggestionsTracker>('lspSuggestionsTracker');
+
+	// Wire trigger sources to the completion provider
+	const inlineEditTriggerer = stateMachine.getInlineEditTriggerer();
+
+	// LinterErrors: trigger when new errors appear
+	diagnosticsTracker.onNewErrors(({ document, position }) => {
+		logger.info('[Extension] Triggering completion due to new linter errors');
+		inlineEditTriggerer.manualTrigger(document, position, TriggerSource.LinterErrors);
+	});
+
+	// ParameterHints: trigger when signature help appears/changes
+	lspSuggestionsTracker.onParameterHintsChange(({ document, position }) => {
+		logger.info('[Extension] Triggering completion due to parameter hints');
+		inlineEditTriggerer.manualTrigger(document, position, TriggerSource.ParameterHints);
+	});
+
+	// LspSuggestions: trigger when LSP completions are detected
+	lspSuggestionsTracker.onCompletionsAvailable(({ document, position }) => {
+		logger.info('[Extension] Triggering completion due to LSP suggestions');
+		inlineEditTriggerer.manualTrigger(document, position, TriggerSource.LspSuggestions);
+	});
 
 	registerInlineCompletionProvider(stateMachine, logger, context.subscriptions);
 	registerInlineAcceptCommand(stateMachine, logger, context.subscriptions);

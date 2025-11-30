@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ILogger } from '../context/contracts';
+import { TriggerSource } from '../context/types';
 
 /**
  * Configuration for inline edit triggering
@@ -55,7 +56,11 @@ export class InlineEditTriggerer implements vscode.Disposable {
   private enabled = true;
 
   /** Event emitter for when trigger should fire */
-  private readonly _onTrigger = new vscode.EventEmitter<{ document: vscode.TextDocument; position: vscode.Position }>();
+  private readonly _onTrigger = new vscode.EventEmitter<{
+    document: vscode.TextDocument;
+    position: vscode.Position;
+    triggerSource: TriggerSource;
+  }>();
   readonly onTrigger = this._onTrigger.event;
 
   constructor(
@@ -231,14 +236,14 @@ export class InlineEditTriggerer implements vscode.Disposable {
     // Debounce rapid selection changes
     const N_ALLOWED_IMMEDIATE = 2; // First is from edit, second is user intentional movement
     if (changeInfo.consecutiveSelectionChanges < N_ALLOWED_IMMEDIATE) {
-      this.triggerSuggestion(e.textEditor.document, e.selections[0].start);
+      this.triggerSuggestion(e.textEditor.document, e.selections[0].start, TriggerSource.LineChange);
     } else {
       // Debounce
       if (changeInfo.debounceTimeout) {
         clearTimeout(changeInfo.debounceTimeout);
       }
       changeInfo.debounceTimeout = setTimeout(() => {
-        this.triggerSuggestion(e.textEditor.document, e.selections[0].start);
+        this.triggerSuggestion(e.textEditor.document, e.selections[0].start, TriggerSource.LineChange);
       }, this.config.selectionChangeDebounceMs);
     }
   }
@@ -247,7 +252,16 @@ export class InlineEditTriggerer implements vscode.Disposable {
     if (!this.enabled || !editor || this.shouldIgnoreDocument(editor.document)) {
       return;
     }
-    // Active editor change is handled via selection change events
+    
+    // Trigger on editor switch (Cursor's Ku.EditorChange)
+    const now = Date.now();
+    const timeSinceLastTrigger = now - this.lastTriggerTime;
+    
+    // Only trigger if we haven't triggered recently
+    if (timeSinceLastTrigger > this.config.sameLineCooldownMs) {
+      this.logger.info('[InlineEditTriggerer] Triggering on editor change');
+      this.triggerSuggestion(editor.document, editor.selection.active, TriggerSource.EditorChange);
+    }
   }
 
   private maybeTriggerOnDocumentSwitch(
@@ -284,14 +298,33 @@ export class InlineEditTriggerer implements vscode.Disposable {
     this.documentChanges.set(docKey, newInfo);
 
     this.logger.info('[InlineEditTriggerer] Triggering on document switch');
-    this.triggerSuggestion(e.textEditor.document, e.selections[0].start);
+    this.triggerSuggestion(e.textEditor.document, e.selections[0].start, TriggerSource.EditorChange);
   }
 
-  private triggerSuggestion(document: vscode.TextDocument, position: vscode.Position): void {
+  private triggerSuggestion(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    triggerSource: TriggerSource
+  ): void {
     this.recordTrigger();
-    this._onTrigger.fire({ document, position });
+    this._onTrigger.fire({ document, position, triggerSource });
     
     // Also trigger VS Code's inline suggestion
     void vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+  }
+
+  /**
+   * Manually trigger a suggestion with a specific source
+   * Used by external components (e.g., DiagnosticsTracker)
+   */
+  manualTrigger(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    triggerSource: TriggerSource
+  ): void {
+    if (!this.enabled || this.shouldIgnoreDocument(document)) {
+      return;
+    }
+    this.triggerSuggestion(document, position, triggerSource);
   }
 }

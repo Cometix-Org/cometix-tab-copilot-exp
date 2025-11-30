@@ -20,26 +20,36 @@ const MAX_SUGGESTIONS_PER_DOC = 20;
 export class LspSuggestionsTracker implements vscode.Disposable {
   private readonly documentSuggestions = new Map<string, DocumentSuggestions>();
   private readonly disposables: vscode.Disposable[] = [];
+
+  /** Event emitter for when parameter hints change (signature help appears/changes) */
+  private readonly _onParameterHintsChange = new vscode.EventEmitter<{
+    document: vscode.TextDocument;
+    position: vscode.Position;
+  }>();
+  readonly onParameterHintsChange = this._onParameterHintsChange.event;
+
+  /** Event emitter for when LSP completions are available */
+  private readonly _onCompletionsAvailable = new vscode.EventEmitter<{
+    document: vscode.TextDocument;
+    position: vscode.Position;
+  }>();
+  readonly onCompletionsAvailable = this._onCompletionsAvailable.event;
+
   private currentSignatureHelp: vscode.SignatureHelp | undefined;
+  private lastCompletionTriggerTime = 0;
+  private readonly completionTriggerDebounceMs = 300;
 
   constructor(private readonly logger: ILogger) {
     // Track completion item selections - this is triggered when user interacts with completion list
     // Unfortunately VS Code doesn't expose a direct way to track shown completions,
     // so we use the completion provider registration and track what completions are triggered
     
-    // Track signature help
+    // Track signature help and LSP completions by listening to document changes
     this.disposables.push(
-      vscode.languages.registerSignatureHelpProvider(
-        { pattern: '**' },
-        {
-          provideSignatureHelp: (doc, pos, token, context) => {
-            // This is just to observe - we don't provide our own signature help
-            // Return undefined to let other providers handle it
-            return undefined;
-          },
-        },
-        '(', ','
-      )
+      vscode.workspace.onDidChangeTextDocument((e) => {
+        this.checkForSignatureHelp(e);
+        this.checkForCompletions(e);
+      })
     );
 
     // Clean up old suggestions periodically
@@ -52,7 +62,115 @@ export class LspSuggestionsTracker implements vscode.Disposable {
     });
   }
 
+  /**
+   * Check if signature help is available after a document change
+   * Triggers ParameterHints event when signature help appears
+   */
+  private async checkForSignatureHelp(e: vscode.TextDocumentChangeEvent): Promise<void> {
+    // Only check if we just typed a trigger character
+    if (e.contentChanges.length === 0) {
+      return;
+    }
+
+    const lastChange = e.contentChanges[e.contentChanges.length - 1];
+    const insertedText = lastChange.text;
+    
+    // Check if we inserted a signature help trigger character
+    if (!insertedText.endsWith('(') && !insertedText.endsWith(',')) {
+      return;
+    }
+
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== e.document) {
+      return;
+    }
+
+    try {
+      const position = editor.selection.active;
+      const signatureHelp = await vscode.commands.executeCommand<vscode.SignatureHelp>(
+        'vscode.executeSignatureHelpProvider',
+        e.document.uri,
+        position
+      );
+
+      if (signatureHelp && signatureHelp.signatures.length > 0) {
+        // Check if this is new/different signature help
+        const prevSig = this.currentSignatureHelp?.signatures[0]?.label;
+        const newSig = signatureHelp.signatures[0]?.label;
+        
+        if (prevSig !== newSig) {
+          this.logger.info(`[LspTracker] Parameter hints changed: ${newSig}`);
+          this.currentSignatureHelp = signatureHelp;
+          this._onParameterHintsChange.fire({ document: e.document, position });
+        }
+      } else if (this.currentSignatureHelp) {
+        // Signature help disappeared
+        this.currentSignatureHelp = undefined;
+      }
+    } catch {
+      // Ignore errors - signature help may not be available
+    }
+  }
+
+  /**
+   * Check if LSP completions are available after a document change
+   * Triggers LspSuggestions event when completions are detected
+   */
+  private async checkForCompletions(e: vscode.TextDocumentChangeEvent): Promise<void> {
+    // Only check if we just typed a completion trigger character
+    if (e.contentChanges.length === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastCompletionTriggerTime < this.completionTriggerDebounceMs) {
+      return;
+    }
+
+    const lastChange = e.contentChanges[e.contentChanges.length - 1];
+    const insertedText = lastChange.text;
+    
+    // Check if we inserted a completion trigger character
+    // Common triggers: `.` for member access, `:` for C++ scope, `>` for arrow operator
+    const completionTriggers = ['.', ':', '>', '@', '#', '/', '"', "'", '<'];
+    const lastChar = insertedText.slice(-1);
+    if (!completionTriggers.includes(lastChar)) {
+      return;
+    }
+
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== e.document) {
+      return;
+    }
+
+    try {
+      const position = editor.selection.active;
+      const completions = await vscode.commands.executeCommand<vscode.CompletionList>(
+        'vscode.executeCompletionItemProvider',
+        e.document.uri,
+        position
+      );
+
+      if (completions && completions.items.length > 0) {
+        this.lastCompletionTriggerTime = now;
+        
+        // Record the suggestions for context
+        const labels = completions.items
+          .slice(0, MAX_SUGGESTIONS_PER_DOC)
+          .map((item) => (typeof item.label === 'string' ? item.label : item.label.label));
+        this.recordSuggestions(e.document.uri.toString(), labels);
+        
+        this.logger.info(`[LspTracker] LSP completions available: ${completions.items.length} items`);
+        this._onCompletionsAvailable.fire({ document: e.document, position });
+      }
+    } catch {
+      // Ignore errors - completions may not be available
+    }
+  }
+
   dispose(): void {
+    this._onParameterHintsChange.dispose();
+    this._onCompletionsAvailable.dispose();
     this.disposables.forEach((d) => d.dispose());
     this.documentSuggestions.clear();
   }

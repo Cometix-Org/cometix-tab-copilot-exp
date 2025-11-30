@@ -117,11 +117,11 @@ export class RecentFilesTracker implements vscode.Disposable {
     // First, add currently visible editors (they're open)
     for (const editor of vscode.window.visibleTextEditors) {
       const doc = editor.document;
-      if (!this.isTrackableDocument(doc)) continue;
-      if (doc.uri.toString() === currentKey) continue;
+      if (!this.isTrackableDocument(doc)) {continue;}
+      if (doc.uri.toString() === currentKey) {continue;}
 
       const relativePath = vscode.workspace.asRelativePath(doc.uri, false);
-      if (relativePath === currentRelative) continue;
+      if (relativePath === currentRelative) {continue;}
 
       const info = await this.buildFileInfo(
         doc.uri,
@@ -145,7 +145,7 @@ export class RecentFilesTracker implements vscode.Disposable {
 
     for (const [key, tracked] of this.trackedFiles.entries()) {
       // Skip current file and visible files
-      if (key === currentKey || visibleUris.has(key)) continue;
+      if (key === currentKey || visibleUris.has(key)) {continue;}
 
       // Skip files that are too old
       if (now - tracked.lastViewedAt > MAX_FILE_AGE_MS) {
@@ -154,10 +154,10 @@ export class RecentFilesTracker implements vscode.Disposable {
       }
 
       const relativePath = vscode.workspace.asRelativePath(tracked.uri, false);
-      if (relativePath === currentRelative) continue;
+      if (relativePath === currentRelative) {continue;}
 
       // Skip if already added
-      if (result.some((r) => r.relativeWorkspacePath === relativePath)) continue;
+      if (result.some((r) => r.relativeWorkspacePath === relativePath)) {continue;}
 
       let doc: vscode.TextDocument | undefined;
       if (fetchContent) {
@@ -212,7 +212,7 @@ export class RecentFilesTracker implements vscode.Disposable {
     doc: vscode.TextDocument | undefined
   ): Promise<AdditionalFileInfo | null> {
     const relativePath = vscode.workspace.asRelativePath(uri, false);
-    if (!relativePath) return null;
+    if (!relativePath) {return null;}
 
     const visibleRangeContent: string[] = [];
     const startLineNumbers: number[] = [];

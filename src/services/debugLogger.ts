@@ -177,11 +177,11 @@ export class DebugLogger {
   }
 
   private getChunkType(chunk: any): string {
-    if (chunk.rangeToReplace) return 'rangeToReplace';
-    if (chunk.text) return 'text';
-    if (chunk.beginEdit) return 'beginEdit';
-    if (chunk.doneEdit) return 'doneEdit';
-    if (chunk.cursorPredictionTarget) return 'cursorPrediction';
+    if (chunk.rangeToReplace) {return 'rangeToReplace';}
+    if (chunk.text) {return 'text';}
+    if (chunk.beginEdit) {return 'beginEdit';}
+    if (chunk.doneEdit) {return 'doneEdit';}
+    if (chunk.cursorPredictionTarget) {return 'cursorPrediction';}
     return 'unknown';
   }
 
@@ -204,8 +204,8 @@ export class DebugLogger {
     if (chunk.shouldRemoveLeadingEol) {
       summary.trimLeading = true;
     }
-    if (chunk.beginEdit) summary.beginEdit = true;
-    if (chunk.doneEdit) summary.doneEdit = true;
+    if (chunk.beginEdit) {summary.beginEdit = true;}
+    if (chunk.doneEdit) {summary.doneEdit = true;}
     
     return summary;
   }

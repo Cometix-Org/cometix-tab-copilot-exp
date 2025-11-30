@@ -154,9 +154,9 @@ export function normalizeToApi2(url: string): string {
  * Detect region from a gcpp URL
  */
 export function detectRegionFromUrl(url: string): OfficialRegion | null {
-  if (url.includes('us.gcpp.cursor.sh')) return 'us';
-  if (url.includes('eu.gcpp.cursor.sh')) return 'eu';
-  if (url.includes('asia.gcpp.cursor.sh')) return 'asia';
-  if (url.includes('api4.cursor.sh')) return 'default';
+  if (url.includes('us.gcpp.cursor.sh')) {return 'us';}
+  if (url.includes('eu.gcpp.cursor.sh')) {return 'eu';}
+  if (url.includes('asia.gcpp.cursor.sh')) {return 'asia';}
+  if (url.includes('api4.cursor.sh')) {return 'default';}
   return null;
 }

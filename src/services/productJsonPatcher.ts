@@ -221,7 +221,7 @@ export async function checkApiProposals(
   proposals: string[]
 ): Promise<{ ok: boolean; path?: string; reason?: string }> {
   const productPath = await firstExistingPath(getCandidateProductJsonPaths());
-  if (!productPath) return { ok: false, reason: '找不到 product.json' };
+  if (!productPath) {return { ok: false, reason: '找不到 product.json' };}
 
   try {
     const content = await fs.readFile(productPath, 'utf8');
@@ -280,7 +280,7 @@ export async function checkAndPromptProposedApiOnStartup(
     return;
   }
 
-  if (selection !== '启用（需要管理员权限）') return;
+  if (selection !== '启用（需要管理员权限）') {return;}
 
   // 用户选择启用 - 先尝试普通权限
   logger.info('[ProductJsonPatcher] 用户选择启用，开始修改流程');

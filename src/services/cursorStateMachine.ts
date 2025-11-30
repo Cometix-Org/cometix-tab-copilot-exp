@@ -570,7 +570,7 @@ export class CursorStateMachine implements vscode.Disposable {
         let predictedFileName: string | undefined;
         
         for await (const response of stream) {
-          if (abortController.signal.aborted) break;
+          if (abortController.signal.aborted) {break;}
           
           const resp = response.response;
           if (resp.case === 'lineNumber') {
@@ -642,7 +642,7 @@ export class CursorStateMachine implements vscode.Disposable {
    */
   hasFollowups(requestId?: string): boolean {
     const id = requestId ?? this.lastAcceptedRequestId;
-    if (!id) return false;
+    if (!id) {return false;}
     const session = this.followups.get(id);
     return session !== undefined && session.queue.length > 0;
   }
@@ -652,7 +652,7 @@ export class CursorStateMachine implements vscode.Disposable {
    */
   getFollowupCount(requestId?: string): number {
     const id = requestId ?? this.lastAcceptedRequestId;
-    if (!id) return 0;
+    if (!id) {return 0;}
     const session = this.followups.get(id);
     return session?.queue.length ?? 0;
   }
@@ -1222,9 +1222,9 @@ export class CursorStateMachine implements vscode.Disposable {
     let seenModelInfo = false;
     let done = false;
     for (;;) {
-      if (abortController.signal.aborted) return;
+      if (abortController.signal.aborted) {return;}
       const res = await rpc.flushCpp(requestId);
-      if (res.type === 'failure') throw new Error(res.reason);
+      if (res.type === 'failure') {throw new Error(res.reason);}
       if (!seenModelInfo && res.modelInfo !== undefined) {
         seenModelInfo = true;
         // Extract and store model info - similar to Cursor's oc() function
@@ -1271,7 +1271,7 @@ export class CursorStateMachine implements vscode.Disposable {
           throw new Error('Unknown flushCppResponse: ' + JSON.stringify(item));
         }
       }
-      if (done) return;
+      if (done) {return;}
       await new Promise((l) => setTimeout(l, 5));
     }
   }

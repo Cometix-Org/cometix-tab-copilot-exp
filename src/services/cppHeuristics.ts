@@ -167,7 +167,7 @@ export class CppHeuristicsService implements vscode.Disposable {
       
       for (let i = 0; i < outputLines.length; i++) {
         // Skip empty last line check
-        if (i === outputLines.length - 1 && outputLines[i] === '') continue;
+        if (i === outputLines.length - 1 && outputLines[i] === '') {continue;}
         
         if (outputLines[i] === undefined || comparisonLines[i] === undefined) {
           allSame = false;

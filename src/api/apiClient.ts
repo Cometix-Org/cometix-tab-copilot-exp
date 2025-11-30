@@ -475,7 +475,7 @@ export class ApiClient {
             // Detailed logging for debugging proto parsing issues
             try {
               const chunkFields: string[] = [];
-              if (anyChunk.modelInfo) chunkFields.push('modelInfo');
+              if (anyChunk.modelInfo) {chunkFields.push('modelInfo');}
               if (anyChunk.rangeToReplace) {
                 const rtr = anyChunk.rangeToReplace;
                 chunkFields.push(`range:L${rtr.startLineNumber}-${rtr.endLineNumberInclusive}`);
@@ -483,11 +483,11 @@ export class ApiClient {
               if (typeof anyChunk.text === 'string') {
                 chunkFields.push(`text(${anyChunk.text.length}chars)`);
               }
-              if (anyChunk.beginEdit) chunkFields.push('beginEdit');
-              if (anyChunk.doneEdit) chunkFields.push('doneEdit');
-              if (anyChunk.doneStream) chunkFields.push('doneStream');
-              if (anyChunk.cursorPredictionTarget) chunkFields.push('cursorPredictionTarget');
-              if (anyChunk.bindingId) chunkFields.push(`bindingId:${anyChunk.bindingId}`);
+              if (anyChunk.beginEdit) {chunkFields.push('beginEdit');}
+              if (anyChunk.doneEdit) {chunkFields.push('doneEdit');}
+              if (anyChunk.doneStream) {chunkFields.push('doneStream');}
+              if (anyChunk.cursorPredictionTarget) {chunkFields.push('cursorPredictionTarget');}
+              if (anyChunk.bindingId) {chunkFields.push(`bindingId:${anyChunk.bindingId}`);}
               
               ApiClient.channel?.appendLine(
                 `[api] StreamCpp chunk #${chunkIndex} for ${options.generateUuid.slice(0,8)}: [${chunkFields.join(', ')}]`
@@ -578,7 +578,7 @@ export class ApiClient {
             modelName: (request as any)?.modelName ?? 'unspecified',
             metrics: {},
           });
-          if (this.cppEvents.length > 20) this.cppEvents = this.cppEvents.slice(0, 20);
+          if (this.cppEvents.length > 20) {this.cppEvents = this.cppEvents.slice(0, 20);}
         }
       })();
     } catch (e: any) {

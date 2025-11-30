@@ -455,7 +455,7 @@ class RpcClient implements IRpcClient {
   private createClient(): ApiClient {
     const config = vscode.workspace.getConfiguration('cometixTab');
     return new ApiClient({
-      baseUrl: config.get('serverUrl'),
+      // baseUrl is resolved from endpointMode, officialRegion, customEndpoint
       authToken: config.get('authToken'),
       clientKey: config.get('clientKey'),
     });

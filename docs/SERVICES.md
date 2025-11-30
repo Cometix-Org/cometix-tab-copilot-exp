@@ -93,7 +93,9 @@ interface IConfigService extends vscode.Disposable {
 
 | 配置键 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `serverUrl` | string | "" | 自定义 API URL（覆盖官方） |
+| `endpointMode` | string | "auto" | 端点模式：official/auto/custom |
+| `officialRegion` | string | "default" | 官方端点区域 |
+| `customEndpoint` | string | "" | 自定义端点 URL |
 | `authToken` | string | "" | 认证令牌 |
 | `clientKey` | string | "" | 客户端密钥（自动生成） |
 
@@ -169,7 +171,7 @@ class RpcClient implements IRpcClient {
   private createClient(): ApiClient {
     const config = vscode.workspace.getConfiguration('cometixTab');
     return new ApiClient({
-      baseUrl: config.get('serverUrl'),
+      // baseUrl is resolved from endpointMode, officialRegion, customEndpoint
       authToken: config.get('authToken'),
       clientKey: config.get('clientKey'),
     });

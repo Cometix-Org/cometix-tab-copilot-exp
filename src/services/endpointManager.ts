@@ -67,8 +67,7 @@ export class EndpointManager implements vscode.Disposable {
         if (
           e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.endpointMode`) ||
           e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.officialRegion`) ||
-          e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.customEndpoint`) ||
-          e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.serverUrl`)
+          e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.customEndpoint`)
         ) {
           this.notifyEndpointChanged();
         }
@@ -114,10 +113,8 @@ export class EndpointManager implements vscode.Disposable {
    */
   getCustomEndpoint(): string {
     const config = vscode.workspace.getConfiguration(EndpointManager.CONFIG_SECTION);
-    // Check new config first, then fallback to deprecated serverUrl
     const customEndpoint = config.get<string>('customEndpoint') || '';
-    const serverUrl = config.get<string>('serverUrl') || '';
-    return customEndpoint.trim() || serverUrl.trim();
+    return customEndpoint.trim();
   }
 
   /**

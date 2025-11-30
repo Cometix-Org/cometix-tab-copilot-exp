@@ -162,11 +162,6 @@
           "default": "",
           "description": "Custom endpoint URL. Only used when endpointMode is 'custom'."
         },
-        "cometixTab.serverUrl": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "**[Deprecated]** Use `#cometixTab.endpointMode#` and `#cometixTab.customEndpoint#` instead. This field is kept for backward compatibility."
-        },
         "cometixTab.authToken": {
           "type": "string",
           "default": "",

@@ -117,8 +117,7 @@ export class ApiClient {
       case 'custom': {
         // Use custom endpoint
         const customEndpoint = vscodeConfig.get<string>('customEndpoint') || '';
-        const serverUrl = vscodeConfig.get<string>('serverUrl') || ''; // deprecated fallback
-        const customUrl = (customEndpoint.trim() || serverUrl.trim());
+        const customUrl = customEndpoint.trim();
         
         if (customUrl) {
           ApiClient.channel?.appendLine(`[config] Using custom endpoint: ${customUrl}`);
@@ -659,27 +658,6 @@ export class ApiClient {
     const { CppConfigRequest } = await import('../rpc/cursor-tab_pb.js');
     const request = new CppConfigRequest({});
     return await this.aiClient.cppConfig(request);
-  }
-
-  async getAvailableModels(): Promise<any> {
-    const url = this.getUrl('availableModels');
-    const headers = this.getHeaders();
-    await this.logRequest('getAvailableModels', url, headers, undefined);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: new Uint8Array()
-    });
-
-    if (!response.ok) {
-      await this.logResponse('getAvailableModels', url, response.status, response.headers, null, false);
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const jsonResponse = await response.json();
-    await this.logResponse('getAvailableModels', url, response.status, response.headers, jsonResponse, false);
-    return jsonResponse;
   }
 
   async uploadFile(request: FSUploadFileRequest): Promise<FSUploadFileResponse> {

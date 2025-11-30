@@ -68,9 +68,9 @@ export class MenuPanel {
   private buildMenuItems(statusInfo: StatusInfo): QuickActionItem[] {
     const items: QuickActionItem[] = [];
 
-    // Header - current status
+    // Header - current status (separators don't support icons)
     items.push({
-      label: '$(info) Current Status',
+      label: 'Current Status',
       description: this.getStatusDescription(statusInfo),
       action: 'noop',
       kind: vscode.QuickPickItemKind.Separator

@@ -87,11 +87,13 @@ code --install-extension cometix-tab-0.0.1.vsix
 | `cometixTab.cppTriggerInComments` | `true` | 在注释中触发建议 |
 | `cometixTab.excludedLanguages` | `[]` | 禁用建议的语言列表 |
 
-### 高级配置
+### 端点配置
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `cometixTab.serverUrl` | `""` | 自定义 API URL（留空使用官方） |
+| `cometixTab.endpointMode` | `"auto"` | 端点模式：`official`/`auto`/`custom` |
+| `cometixTab.officialRegion` | `"default"` | 官方端点区域：`default`/`us`/`eu`/`asia` |
+| `cometixTab.customEndpoint` | `""` | 自定义端点 URL |
 | `cometixTab.clientKey` | `""` | 客户端密钥（留空自动生成） |
 
 ### 调试配置

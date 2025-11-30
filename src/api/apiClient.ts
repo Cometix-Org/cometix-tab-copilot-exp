@@ -63,13 +63,12 @@ export class ApiClient {
 
     const customBaseUrl = override?.baseUrl || vscodeConfig.get<string>('serverUrl');
 
-    // 閺呴缚鍏楿RL濡�偓濞村�绱版俊鍌涚亯閻€劍鍩涘▽鈩冩箒鐠佸墽鐤嗛懛顏勭暰娑斿�RL閿涘本鍨ㄩ懓鍛�秼閸撳硨RL娑撳秵妲哥€规ɑ鏌熼崺鐔锋倳閿涘奔濞囬悽銊╃帛鐠併倕鐣奸弬绛揜L
+    // 如果用户提供了自定义 URL，直接使用；否则使用默认官方 URL
     let baseUrl: string;
     if (!customBaseUrl || customBaseUrl.trim() === '') {
       baseUrl = DEFAULT_BASE_URL;
     } else {
-      const isOfficialUrl = customBaseUrl.includes('api2.cursor.sh') || customBaseUrl.includes('cursor.sh');
-      baseUrl = isOfficialUrl ? customBaseUrl : DEFAULT_BASE_URL;
+      baseUrl = customBaseUrl;
     }
 
     // 婵″倹鐏夊▽鈩冩箒鐎广垺鍩涚粩顖氱槕闁姐儻绱濋懛顏勫З閻㈢喐鍨氭稉鈧??
@@ -842,14 +841,7 @@ export class ApiClient {
       issues.push('Client key is not set');
     }
 
-    if (this.config.baseUrl) {
-      const isOfficialUrl = this.config.baseUrl.includes('api2.cursor.sh') ||
-        this.config.baseUrl.includes('cursor.sh');
-
-      if (!isOfficialUrl) {
-        issues.push('Endpoint URL does not appear to be the official Cursor API');
-      }
-    }
+    // 允许用户使用自定义 URL，不再强制检查是否为官方 URL
 
     return {
       isValid: issues.length === 0,

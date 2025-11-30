@@ -11,6 +11,7 @@ import {
   StreamCppResponse,
   StreamNextCursorPredictionRequest,
   StreamNextCursorPredictionResponse,
+  StreamCppRequest_ControlToken,
 } from '../rpc/cursor-tab_pb';
 import { CursorFeatureFlags, DebugConfig } from './types';
 
@@ -122,4 +123,37 @@ export interface ITelemetryService extends vscode.Disposable {
     kind: 'word' | 'line' | 'suggest' | 'unknown'
   ): void;
   recordGenerationFinished(requestId: string, success: boolean): void;
+}
+
+/**
+ * Interface for workspace-level persistent storage
+ * Mirrors Cursor's pb.workspaceUserPersistentStorage and pb.applicationUserPersistentStorage
+ */
+export interface IWorkspaceStorage extends vscode.Disposable {
+  /**
+   * Get the unique workspace ID for CPP requests
+   * Generated once per workspace and persisted
+   */
+  getWorkspaceId(): string;
+
+  /**
+   * Get control token from application storage
+   * Used for non-manual triggers
+   */
+  getControlToken(): StreamCppRequest_ControlToken | undefined;
+
+  /**
+   * Set control token in application storage
+   */
+  setControlToken(token: StreamCppRequest_ControlToken | undefined): Promise<void>;
+
+  /**
+   * Get checkFilesyncHashPercent from config
+   */
+  getCheckFilesyncHashPercent(): number;
+
+  /**
+   * Clear cached values
+   */
+  clearCache(): void;
 }

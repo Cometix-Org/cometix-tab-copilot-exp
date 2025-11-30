@@ -13,6 +13,7 @@ import {
   IRecentFilesTracker,
   ITelemetryService,
   ILspSuggestionsTracker,
+  IWorkspaceStorage,
 } from '../context/contracts';
 import { CursorFeatureFlags, TriggerSource } from '../context/types';
 import { CursorPredictionController } from '../controllers/cursorPredictionController';
@@ -90,6 +91,17 @@ interface FollowupSession {
   readonly queue: RawSuggestion[];
 }
 
+/**
+ * Cached suggestion entry - similar to Cursor's this.O cache
+ * Used to cache suggestions when they can't be displayed immediately
+ */
+interface CachedSuggestion {
+  readonly suggestion: SuggestionResult;
+  readonly documentUri: string;
+  readonly documentVersion: number;
+  readonly timestamp: number;
+}
+
 interface BindingEntry {
   readonly requestId: string;
   readonly document: vscode.Uri;
@@ -121,6 +133,9 @@ export class CursorStateMachine implements vscode.Disposable {
   private readonly followups = new Map<string, FollowupSession>();
   /** Next action cache - similar to Cursor's eb cache for tracking what to do after accept */
   private readonly nextActionCache = new Map<string, NextActionEntry>();
+  /** Suggestion cache - similar to Cursor's this.O cache for storing suggestions when they can't be displayed immediately */
+  private readonly suggestionCache: CachedSuggestion[] = [];
+  private readonly maxCachedSuggestions = 5;
   /** Pending next action when cache miss occurs */
   private pendingNextAction?: {
     uri: vscode.Uri;
@@ -155,6 +170,8 @@ export class CursorStateMachine implements vscode.Disposable {
     private readonly recentFilesTracker?: IRecentFilesTracker,
     private readonly telemetryService?: ITelemetryService,
     private readonly lspSuggestionsTracker?: ILspSuggestionsTracker,
+    // Workspace storage for persisting workspaceId and controlToken
+    private readonly workspaceStorage?: IWorkspaceStorage,
   ) {
     this.flags = config.flags;
     config.onDidChange((next) => (this.flags = next));
@@ -182,11 +199,82 @@ export class CursorStateMachine implements vscode.Disposable {
     this.pendingNextAction = undefined;
     this.heuristics.dispose();
     this.inlineEditTriggerer.dispose();
+    this.suggestionCache.length = 0;
+  }
+
+  /**
+   * Add a suggestion to the cache - similar to Cursor's this.O.addSuggestion
+   */
+  private addToSuggestionCache(
+    suggestion: SuggestionResult,
+    documentUri: string,
+    documentVersion: number
+  ): void {
+    this.suggestionCache.push({
+      suggestion,
+      documentUri,
+      documentVersion,
+      timestamp: Date.now(),
+    });
+    
+    // Keep cache size bounded
+    while (this.suggestionCache.length > this.maxCachedSuggestions) {
+      this.suggestionCache.shift();
+    }
+    
+    this.logger.info(`[Cpp] Added suggestion to cache (size: ${this.suggestionCache.length})`);
+  }
+
+  /**
+   * Try to get a cached suggestion for the document - similar to Cursor's this.O.popCacheHit
+   * Returns the most recent matching suggestion and removes it from cache
+   */
+  private popCachedSuggestion(documentUri: string, documentVersion: number): SuggestionResult | null {
+    // Find most recent matching suggestion (same document, version not older than current - 1)
+    // Allow version difference of 1 to handle minor edits
+    for (let i = this.suggestionCache.length - 1; i >= 0; i--) {
+      const cached = this.suggestionCache[i];
+      if (cached.documentUri === documentUri && 
+          cached.documentVersion >= documentVersion - 1) {
+        // Remove from cache
+        this.suggestionCache.splice(i, 1);
+        this.logger.info(`[Cpp] Cache hit! Using cached suggestion (cache size: ${this.suggestionCache.length})`);
+        return cached.suggestion;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Clear cached suggestions for a document (e.g., when document changes significantly)
+   */
+  private clearSuggestionCache(documentUri?: string): void {
+    if (documentUri) {
+      const before = this.suggestionCache.length;
+      this.suggestionCache.splice(0, this.suggestionCache.length, 
+        ...this.suggestionCache.filter(c => c.documentUri !== documentUri));
+      if (before !== this.suggestionCache.length) {
+        this.logger.info(`[Cpp] Cleared ${before - this.suggestionCache.length} cached suggestion(s) for ${documentUri}`);
+      }
+    } else {
+      this.suggestionCache.length = 0;
+    }
   }
 
   async requestSuggestion(ctx: SuggestionContext): Promise<SuggestionResult | null> {
     if (!this.flags.enableInlineSuggestions || !this.isEligible(ctx)) {
       return null;
+    }
+
+    // Check cache first - similar to Cursor's this.O.popCacheHit pattern
+    // This is the key to not losing suggestions when requests are superseded
+    const cachedSuggestion = this.popCachedSuggestion(
+      ctx.document.uri.toString(),
+      ctx.document.version
+    );
+    if (cachedSuggestion) {
+      this.logger.info(`[Cpp] Using cached suggestion instead of making new request`);
+      return cachedSuggestion;
     }
 
     // Use debounce manager if available
@@ -271,6 +359,10 @@ export class CursorStateMachine implements vscode.Disposable {
               lspSuggestions,
               enableMoreContext: this.flags.enableAdditionalFilesContext,
               isManualTrigger: triggerSource === TriggerSource.ManualTrigger,
+              // Workspace storage fields - matching Cursor's behavior
+              workspaceId: this.workspaceStorage?.getWorkspaceId(),
+              storedControlToken: this.workspaceStorage?.getControlToken(),
+              checkFilesyncHashPercent: this.workspaceStorage?.getCheckFilesyncHashPercent() ?? 0,
             }),
             ctx,
             abortController,
@@ -284,7 +376,20 @@ export class CursorStateMachine implements vscode.Disposable {
       // Check if this request is still current (not superseded by a newer request)
       const currentRequest = this.currentRequestByDocument.get(docKey);
       if (currentRequest !== requestId) {
-        this.logger.info(`[Cpp] Request ${requestId.slice(0, 8)} superseded by ${currentRequest?.slice(0, 8)}, discarding result`);
+        // Instead of discarding, cache the result like Cursor does (this.O.addSuggestion pattern)
+        // The next request will check the cache first
+        this.logger.info(`[Cpp] Request ${requestId.slice(0, 8)} superseded by ${currentRequest?.slice(0, 8)}, caching result instead of discarding`);
+        
+        if (chunks.length > 0) {
+          const [first, ...rest] = chunks;
+          const suggestion: SuggestionResult = { ...first, requestId };
+          this.addToSuggestionCache(suggestion, ctx.document.uri.toString(), ctx.document.version);
+          
+          // Also handle followups if any
+          if (rest.length) {
+            this.followups.set(requestId, { document: ctx.document.uri, queue: rest });
+          }
+        }
         return null;
       }
       

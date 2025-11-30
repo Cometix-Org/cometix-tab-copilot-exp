@@ -17,6 +17,7 @@ import { DebounceManager } from './services/debounceManager';
 import { RecentFilesTracker } from './services/recentFilesTracker';
 import { TelemetryService } from './services/telemetryService';
 import { LspSuggestionsTracker } from './services/lspSuggestionsTracker';
+import { WorkspaceStorage } from './services/workspaceStorage';
 
 export function activate(context: vscode.ExtensionContext) {
 	const container = new ServiceContainer(context);
@@ -37,6 +38,8 @@ export function activate(context: vscode.ExtensionContext) {
 	container.registerSingleton('recentFilesTracker', (c) => new RecentFilesTracker(c.resolve('logger')));
 	container.registerSingleton('telemetryService', (c) => new TelemetryService(c.resolve('logger')));
 	container.registerSingleton('lspSuggestionsTracker', (c) => new LspSuggestionsTracker(c.resolve('logger')));
+	// Workspace storage for persisting workspaceId and controlToken
+	container.registerSingleton('workspaceStorage', () => new WorkspaceStorage(context));
 	
 	container.registerSingleton('cursorStateMachine', (c) =>
 		new CursorStateMachine(
@@ -50,7 +53,9 @@ export function activate(context: vscode.ExtensionContext) {
 			c.resolve('debounceManager'),
 			c.resolve('recentFilesTracker'),
 			c.resolve('telemetryService'),
-			c.resolve('lspSuggestionsTracker')
+			c.resolve('lspSuggestionsTracker'),
+			// Workspace storage for persistent data
+			c.resolve('workspaceStorage')
 		)
 	);
 	container.registerSingleton('cursorPrediction', (c) =>

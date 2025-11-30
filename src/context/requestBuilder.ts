@@ -14,27 +14,47 @@ import {
   LineRange,
   LspSuggestedItems,
   LspSuggestion,
+  CppFileDiffHistory,
+  CppParameterHint,
 } from '../rpc/cursor-tab_pb';
 import { IDocumentTracker } from './contracts';
-import { TriggerSource, AdditionalFileInfo, LspSuggestionsContext } from './types';
+import { TriggerSource, AdditionalFileInfo, LspSuggestionsContext, ParameterHintsContext } from './types';
+import {
+  truncateContentAroundCursor,
+  calculateSHA256,
+  shouldCalculateHash,
+} from '../utils/contentProcessor';
 
 export interface RequestContextOptions {
   readonly document: vscode.TextDocument;
   readonly position: vscode.Position;
+  /** @deprecated Cursor uses fileDiffHistories instead, this is kept for compatibility */
   readonly diffHistory?: string[];
   readonly linterDiagnostics?: vscode.Diagnostic[];
   readonly visibleRanges?: vscode.Range[];
+  /** @deprecated Cursor always sends empty array for filesyncUpdates in streamCpp */
   readonly filesyncUpdates?: FilesyncUpdateWithModelVersion[];
   readonly relyOnFileSync?: boolean;
   readonly fileVersion?: number;
   readonly contentsOverride?: string;
   readonly lineEnding?: string;
-  // New fields for enhanced context
+  // New fields for enhanced context (matching Cursor)
   readonly triggerSource?: TriggerSource;
   readonly additionalFiles?: AdditionalFileInfo[];
   readonly lspSuggestions?: LspSuggestionsContext;
   readonly enableMoreContext?: boolean;
   readonly isManualTrigger?: boolean;
+  // Fields matching Cursor's getStream implementation
+  readonly modelName?: string;
+  readonly workspaceId?: string;
+  readonly parameterHints?: ParameterHintsContext;
+  readonly fileDiffHistories?: CppFileDiffHistory[];
+  /** Time when the request started (performance.now() + performance.timeOrigin) */
+  readonly startOfCpp?: number;
+  /** Control token from persistent storage (for non-manual triggers) */
+  readonly storedControlToken?: StreamCppRequest_ControlToken;
+  /** Percentage (0-1) of requests that should include SHA256 hash */
+  readonly checkFilesyncHashPercent?: number;
 }
 
 export function buildStreamRequest(
@@ -42,7 +62,6 @@ export function buildStreamRequest(
   options: RequestContextOptions
 ): StreamCppRequest {
   const { currentFile, linterErrors } = buildFileInfo(options);
-  const diffHistory = options.diffHistory ?? tracker.getHistory(options.document.uri);
 
   // Build additional files from context
   const additionalFiles = buildAdditionalFiles(options.additionalFiles);
@@ -50,32 +69,64 @@ export function buildStreamRequest(
   // Build LSP suggestions
   const lspSuggestedItems = buildLspSuggestions(options.lspSuggestions);
 
+  // Build parameter hints
+  const parameterHints = buildParameterHints(options.parameterHints);
+
   // Build cpp intent info
   const cppIntentInfo = options.triggerSource
     ? new CppIntentInfo({ source: options.triggerSource })
     : undefined;
 
-  // Control token: OP for manual trigger, undefined otherwise
+  // Control token: OP for manual trigger, otherwise read from storage
+  // Matches Cursor's behavior: source === Ku.ManualTrigger ? Gie.OP : pb.applicationUserPersistentStorage.cppControlToken
   const controlToken = options.isManualTrigger
     ? StreamCppRequest_ControlToken.OP
-    : undefined;
+    : options.storedControlToken;
 
+  // Calculate timeSinceRequestStart like Cursor does
+  const now = performance.now() + performance.timeOrigin;
+  const timeSinceRequestStart = options.startOfCpp ? now - options.startOfCpp : 0;
+
+  // Build request matching Cursor's getStream implementation exactly
+  // Key insight: Cursor sends diffHistory as empty array, uses fileDiffHistories instead
   return new StreamCppRequest({
+    // Core file info
     currentFile,
-    diffHistory,
     linterErrors,
-    timeSinceRequestStart: 0,
-    timeAtRequestSend: Date.now(),
+    
+    // Diff history: Cursor sends empty diffHistory, uses fileDiffHistories
+    diffHistory: [],  // Always empty in Cursor
+    diffHistoryKeys: [],  // Always empty in Cursor
+    fileDiffHistories: options.fileDiffHistories ?? [],
+    mergedDiffHistories: [],  // Always empty in Cursor
+    blockDiffPatches: [],  // Always empty in Cursor
+    
+    // Context items: Always empty in Cursor
     contextItems: [],
-    filesyncUpdates: options.filesyncUpdates ?? [],
-    // New fields
-    cppIntentInfo,
+    lspContexts: [],  // Always empty in Cursor
+    
+    // Model and workspace
+    modelName: options.modelName,
+    workspaceId: options.workspaceId,
+    
+    // Additional context
     additionalFiles,
+    parameterHints,
     lspSuggestedItems,
     enableMoreContext: options.enableMoreContext,
+    
+    // Intent and control
+    cppIntentInfo,
     controlToken,
+    
+    // Timing
+    timeSinceRequestStart,
+    timeAtRequestSend: Date.now(),
     clientTime: Date.now(),
     clientTimezoneOffset: new Date().getTimezoneOffset(),
+    
+    // FileSync: Cursor always sends empty array in streamCpp
+    filesyncUpdates: [],
   });
 }
 
@@ -120,6 +171,31 @@ function buildLspSuggestions(context?: LspSuggestionsContext): LspSuggestedItems
   });
 }
 
+/**
+ * Build CppParameterHint proto messages from context
+ * Matching Cursor's Eb.getRelevantParameterHints() behavior:
+ * - Filter signatures with label length < 5000
+ * - Limit to 2 signatures
+ * - Extract label and documentation
+ */
+function buildParameterHints(context?: ParameterHintsContext): CppParameterHint[] {
+  if (!context || context.signatures.length === 0) {
+    return [];
+  }
+
+  // Match Cursor's filtering: label < 5000 chars, max 2 signatures
+  return context.signatures
+    .filter((sig) => sig.label.length < 5000)
+    .slice(0, 2)
+    .map(
+      (sig) =>
+        new CppParameterHint({
+          label: sig.label,
+          documentation: sig.documentation,
+        })
+    );
+}
+
 export function buildPredictionRequest(
   tracker: IDocumentTracker,
   options: RequestContextOptions
@@ -155,18 +231,55 @@ function buildFileInfo(options: RequestContextOptions): {
   const lineEnding =
     options.lineEnding ??
     (options.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n');
-  const contents =
-    options.contentsOverride ?? options.document.getText();
+  
+  // Get raw content
+  const rawContents = options.contentsOverride ?? options.document.getText();
+  
+  // Calculate SHA256 hash based on config
+  // IMPORTANT: Always hash the ORIGINAL (raw) content, not truncated/empty content
+  // This is used for filesync verification - server needs hash of full file content
+  // Matches Cursor's rc() function:
+  // - Always calculate if relyOnFileSync is true (for verification)
+  // - Otherwise calculate based on checkFilesyncHashPercent probability
+  let sha256Hash: string | undefined;
+  if (shouldCalculateHash(relyOnFileSync, options.checkFilesyncHashPercent ?? 0)) {
+    sha256Hash = calculateSHA256(rawContents);
+  }
+  
+  // Apply content truncation when NOT relying on file sync
+  // Matches Cursor's lc() function: truncate to 300 lines before/after cursor
+  // When relyOnFileSync=true, contents is empty (server uses its synced version)
+  let contents = '';
+  let contentsStartAtLine = 0;
+  
+  if (!relyOnFileSync) {
+    const truncationResult = truncateContentAroundCursor(
+      rawContents,
+      options.position.line,
+      lineEnding
+    );
+    contents = truncationResult.contents;
+    contentsStartAtLine = truncationResult.contentsStartAtLine;
+  }
+
   const currentFile = new CurrentFileInfo({
     relativeWorkspacePath: relativePath,
-    contents: relyOnFileSync ? '' : contents,
+    contents,
     cursorPosition,
     relyOnFilesync: relyOnFileSync,
     fileVersion: options.fileVersion ?? options.document.version,
     lineEnding,
-    // Additional fields matching Cursor client
-    languageId: options.document.languageId,
-    totalNumberOfLines: options.document.lineCount,
+    // SHA256 hash based on config
+    sha256Hash,
+    // Start line when content is truncated
+    contentsStartAtLine,
+    // IMPORTANT: Cursor sends empty string for languageId
+    // This is intentional - the server determines language from file extension
+    languageId: '',
+    // IMPORTANT: Cursor does NOT send totalNumberOfLines
+    // We explicitly omit it (proto default is 0, but Cursor doesn't set it)
+    // totalNumberOfLines is commented out to match Cursor behavior
+    // workspaceRootPath is sent by Cursor
     workspaceRootPath,
   });
 

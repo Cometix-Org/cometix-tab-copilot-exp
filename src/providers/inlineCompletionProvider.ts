@@ -37,6 +37,8 @@ export class CursorInlineCompletionProvider implements vscode.InlineCompletionIt
       earliestShownDateTime: context.earliestShownDateTime,
       // Proposed API: userPrompt - optional user instruction for the completion
       userPrompt: context.userPrompt,
+      // VS Code triggerKind: Invoke (0) = manual trigger, Automatic (1) = while typing
+      triggerKind: context.triggerKind,
     };
     const suggestion = await this.stateMachine.requestSuggestion(suggestionContext);
     if (!suggestion) {

@@ -30,8 +30,10 @@ export interface SuggestionContext {
   readonly earliestShownDateTime?: number;
   // Proposed API: userPrompt from context (optional user instruction)
   readonly userPrompt?: string;
-  // Trigger source for telemetry
+  // Trigger source for telemetry - derived from VS Code InlineCompletionTriggerKind
   readonly triggerSource?: TriggerSource;
+  // VS Code's InlineCompletionTriggerKind - Invoke (0) = manual, Automatic (1) = while typing
+  readonly triggerKind?: vscode.InlineCompletionTriggerKind;
 }
 
 export interface SuggestionResult {
@@ -312,8 +314,11 @@ export class CursorStateMachine implements vscode.Disposable {
     }
     this.currentRequestByDocument.set(docKey, requestId);
 
+    // Derive trigger source from VS Code's triggerKind if not explicitly provided
+    const triggerSource = this.getTriggerSource(ctx);
+    const isManualTrigger = triggerSource === TriggerSource.ManualTrigger;
+    
     // Record telemetry for trigger
-    const triggerSource = ctx.triggerSource ?? TriggerSource.Unknown;
     this.telemetryService?.recordTriggerStart(requestId);
     this.telemetryService?.recordTriggerEvent(ctx.document, requestId, ctx.position, triggerSource);
 
@@ -358,7 +363,7 @@ export class CursorStateMachine implements vscode.Disposable {
               additionalFiles,
               lspSuggestions,
               enableMoreContext: this.flags.enableAdditionalFilesContext,
-              isManualTrigger: triggerSource === TriggerSource.ManualTrigger,
+              isManualTrigger,
               // Workspace storage fields - matching Cursor's behavior
               workspaceId: this.workspaceStorage?.getWorkspaceId(),
               storedControlToken: this.workspaceStorage?.getControlToken(),
@@ -1248,18 +1253,38 @@ export class CursorStateMachine implements vscode.Disposable {
     if (editor && !editor.selection.isEmpty) {
       return false;
     }
-    // Size limit to avoid performance issues
+    // Size limit to avoid performance issues (matches Cursor's behavior)
     const sizeLimit = 800_000;
     if (ctx.document.getText().length > sizeLimit) {
+      this.logger.info(`[Cpp] Skipping completion - file too large (${ctx.document.getText().length} > ${sizeLimit})`);
       return false;
     }
-    // Like Cursor, skip completions in comment areas
-    // (except for CursorPrediction source which Cursor allows)
-    if (this.isInCommentArea(ctx.document, ctx.position)) {
-      this.logger.info(`[Cpp] Skipping completion - cursor is in comment area at line ${ctx.position.line + 1}`);
+    
+    // Check for comment areas - respecting cppTriggerInComments config
+    // Manual triggers (Invoke) always bypass comment check (like Cursor)
+    const isManualTrigger = ctx.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
+    const allowCommentsCompletion = this.flags.cppTriggerInComments || isManualTrigger;
+    
+    if (!allowCommentsCompletion && this.isInCommentArea(ctx.document, ctx.position)) {
+      this.logger.info(`[Cpp] Skipping completion - cursor is in comment area at line ${ctx.position.line + 1} (cppTriggerInComments=${this.flags.cppTriggerInComments})`);
       return false;
     }
     return true;
+  }
+  
+  /**
+   * Derive TriggerSource from VS Code's InlineCompletionTriggerKind
+   * Maps: Invoke → ManualTrigger, Automatic → Typing
+   */
+  private getTriggerSource(ctx: SuggestionContext): TriggerSource {
+    if (ctx.triggerSource) {
+      return ctx.triggerSource;
+    }
+    if (ctx.triggerKind === vscode.InlineCompletionTriggerKind.Invoke) {
+      return TriggerSource.ManualTrigger;
+    }
+    // Default to Typing for Automatic triggers
+    return TriggerSource.Typing;
   }
 
   /**

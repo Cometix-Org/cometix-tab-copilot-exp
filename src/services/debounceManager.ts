@@ -8,11 +8,11 @@ function generateUuid(): string {
 
 /**
  * Request tracking entry for debouncing
+ * NOTE: Cursor does NOT store AbortController in entries - it's returned but not tracked here
  */
 interface RequestEntry {
   requestId: string;
   startTime: number;
-  abortController: AbortController;
 }
 
 /**
@@ -26,24 +26,24 @@ export interface RunRequestResult {
 }
 
 /**
- * Debounce manager that mirrors Cursor's debouncing behavior.
- * Prevents excessive requests by tracking request timing and cancelling
- * requests that are superseded by newer ones.
+ * Debounce manager that EXACTLY mirrors Cursor's debouncing behavior.
  * 
- * Key features matching Cursor:
- * - Max concurrent streams limit (default: 6)
- * - Client debounce duration (default: 25ms like Cursor)
- * - Total debounce duration (default: 60ms like Cursor)
- * - Automatic abortion of oldest streams when limit exceeded
+ * Cursor's Z$s class behavior:
+ * - this.b = clientDebounceDuration (default: 25ms)
+ * - this.c = totalDebounceDuration (default: 60ms) 
+ * - this.d = maxRequestAge (for pruning old entries)
+ * - this.a = request entries array
+ * 
+ * Key difference from previous implementation:
+ * - runRequest does NOT enforce max concurrent streams (that's handled separately)
+ * - runRequest does NOT abort streams - it only tracks timing
+ * - requestIdsToCancel = requests within totalDebounceDuration window
  */
 export class DebounceManager implements vscode.Disposable {
-  private requests: RequestEntry[] = [];
-  // Cursor defaults: ZJo = 25, eGo = 60
-  private clientDebounceDuration = 25; // ms - debounce window for client (Cursor default)
-  private totalDebounceDuration = 60; // ms - total debounce window (Cursor default)
-  private maxRequestAge = 10000; // ms - prune requests older than this
-  // Cursor's jc = 6
-  private maxConcurrentStreams = 6; // Maximum concurrent streams allowed
+  private requests: RequestEntry[] = [];  // Cursor's this.a
+  private clientDebounceDuration = 25;    // Cursor's this.b - debounce window for shouldDebounce
+  private totalDebounceDuration = 60;     // Cursor's this.c - window for requestIdsToCancel
+  private maxRequestAge = 10000;          // Cursor's this.d - prune requests older than this
 
   constructor(private readonly logger: ILogger) {}
 
@@ -52,12 +52,11 @@ export class DebounceManager implements vscode.Disposable {
   }
 
   /**
-   * Configure debounce durations and max streams
+   * Configure debounce durations - matches Cursor's setDebouncingDurations
    */
   setDebounceDurations(options: {
     clientDebounceDuration?: number;
     totalDebounceDuration?: number;
-    maxConcurrentStreams?: number;
   }): void {
     if (options.clientDebounceDuration !== undefined) {
       this.clientDebounceDuration = options.clientDebounceDuration;
@@ -65,16 +64,16 @@ export class DebounceManager implements vscode.Disposable {
     if (options.totalDebounceDuration !== undefined) {
       this.totalDebounceDuration = options.totalDebounceDuration;
     }
-    if (options.maxConcurrentStreams !== undefined) {
-      this.maxConcurrentStreams = options.maxConcurrentStreams;
-    }
   }
 
   /**
-   * Remove old requests that are past the max age
+   * Remove old requests that are past the max age.
+   * Cursor iterates in reverse and splices - we use simpler filter.
    */
   private pruneOldRequests(): void {
     const now = performance.now() + performance.timeOrigin;
+    // Cursor: for (const [t, s] of [...this.a.entries()].reverse()) 
+    //           if (now - s.startTime > this.d) this.a.splice(t, 1);
     this.requests = this.requests.filter(
       (entry) => now - entry.startTime <= this.maxRequestAge
     );
@@ -84,9 +83,21 @@ export class DebounceManager implements vscode.Disposable {
    * Create a new request entry and return info needed to run it.
    * Also returns IDs of requests that should be cancelled.
    * 
-   * Implements Cursor's stream limiting logic:
-   * - If too many concurrent streams, abort oldest ones
-   * - Find requests within debounce window to cancel
+   * EXACTLY matches Cursor's runRequest logic:
+   * ```javascript
+   * runRequest() {
+   *   this.pruneOldRequests();
+   *   const now = performance.now() + performance.timeOrigin;
+   *   const uuid = Ft();  // generateUuid
+   *   const idsToCancel = this.a.filter(n => n.startTime + this.c > now).map(n => n.requestId);
+   *   this.a.push({ requestId: uuid, startTime: now });
+   *   const abortController = new AbortController();
+   *   return { generationUUID: uuid, startTime: now, abortController, requestIdsToCancel: idsToCancel };
+   * }
+   * ```
+   * 
+   * NOTE: Cursor does NOT enforce max concurrent streams here - that's handled separately.
+   * NOTE: Cursor does NOT store AbortController in entries - just returns it.
    */
   runRequest(): RunRequestResult {
     this.pruneOldRequests();
@@ -95,40 +106,23 @@ export class DebounceManager implements vscode.Disposable {
     const generationUUID = generateUuid();
     const abortController = new AbortController();
 
-    // Enforce max concurrent streams limit (like Cursor's jc = 6)
-    // Abort oldest streams when limit is exceeded
-    const requestIdsToCancel: string[] = [];
-    
-    while (this.requests.length >= this.maxConcurrentStreams) {
-      const oldest = this.requests.shift();
-      if (oldest) {
-        this.logger.info(
-          `[Debounce] Too many streams (${this.requests.length + 1}/${this.maxConcurrentStreams}), aborting oldest: ${oldest.requestId.slice(0, 8)}`
-        );
-        oldest.abortController.abort();
-        requestIdsToCancel.push(oldest.requestId);
-      }
-    }
+    // Find requests within totalDebounceDuration window to cancel
+    // Cursor: this.a.filter(n => n.startTime + this.c > now).map(n => n.requestId)
+    const requestIdsToCancel = this.requests
+      .filter((entry) => entry.startTime + this.totalDebounceDuration > now)
+      .map((entry) => entry.requestId);
 
-    // Also cancel requests within the total debounce window
-    for (const entry of this.requests) {
-      if (entry.startTime + this.totalDebounceDuration > now) {
-        if (!requestIdsToCancel.includes(entry.requestId)) {
-          requestIdsToCancel.push(entry.requestId);
-        }
-      }
-    }
-
-    // Add new request with its abort controller
+    // Add new request (Cursor doesn't store AbortController in entries)
     this.requests.push({
       requestId: generationUUID,
       startTime: now,
-      abortController,
     });
 
-    this.logger.info(
-      `[Debounce] New request ${generationUUID.slice(0, 8)}, cancelling ${requestIdsToCancel.length} pending requests`
-    );
+    if (requestIdsToCancel.length > 0) {
+      this.logger.info(
+        `[Debounce] New request ${generationUUID.slice(0, 8)}, marking ${requestIdsToCancel.length} pending requests for cancellation`
+      );
+    }
 
     return {
       generationUUID,
@@ -202,27 +196,23 @@ export class DebounceManager implements vscode.Disposable {
   }
 
   /**
-   * Abort a specific request by ID
+   * Remove a specific request by ID (for cleanup)
+   * NOTE: Cursor doesn't have abortRequest - AbortControllers are managed externally
    */
-  abortRequest(requestId: string): void {
-    const entry = this.requests.find((e) => e.requestId === requestId);
-    if (entry) {
-      entry.abortController.abort();
-      this.removeRequest(requestId);
-      this.logger.info(`[Debounce] Manually aborted request ${requestId.slice(0, 8)}`);
-    }
+  forgetRequest(requestId: string): void {
+    this.removeRequest(requestId);
   }
 
   /**
-   * Abort all pending requests
+   * Clear all tracked requests (for cleanup/reset)
+   * NOTE: Cursor doesn't have abortAll - AbortControllers are managed externally
    */
-  abortAll(): void {
-    for (const entry of this.requests) {
-      entry.abortController.abort();
-    }
+  clear(): void {
     const count = this.requests.length;
     this.requests = [];
-    this.logger.info(`[Debounce] Aborted all ${count} pending requests`);
+    if (count > 0) {
+      this.logger.info(`[Debounce] Cleared ${count} tracked requests`);
+    }
   }
 
   /**

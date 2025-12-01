@@ -116,8 +116,9 @@ export function activate(context: vscode.ExtensionContext) {
 	const endpointManager = new EndpointManager(context);
 	context.subscriptions.push(endpointManager);
 
-	// Get RpcClient for refresh callback
+	// Get RpcClient and wire up EndpointManager
 	const rpcClient = container.resolve<RpcClient>('rpcClient');
+	rpcClient.setEndpointManager(endpointManager);
 	
 	// Register endpoint commands
 	const endpointCommandDisposables = registerEndpointCommands(
@@ -126,14 +127,6 @@ export function activate(context: vscode.ExtensionContext) {
 		() => rpcClient.refreshClient()
 	);
 	context.subscriptions.push(...endpointCommandDisposables);
-
-	// Listen for endpoint changes and refresh client
-	context.subscriptions.push(
-		endpointManager.onEndpointChanged((resolved) => {
-			logger.info(`[Extension] Endpoint changed: mode=${resolved.mode}, url=${resolved.geoCppUrl}`);
-			rpcClient.refreshClient();
-		})
-	);
 
 	// Initialize UI components
 	const snoozeService = SnoozeService.getInstance();

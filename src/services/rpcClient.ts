@@ -12,10 +12,12 @@ import {
   FSSyncFileResponse,
 } from '../rpc/cursor-tab_pb';
 import { ILogger, IRpcClient } from '../context/contracts';
+import { EndpointManager } from './endpointManager';
 
 export class RpcClient implements vscode.Disposable, IRpcClient {
   private client: ApiClient;
   private readonly disposables: vscode.Disposable[] = [];
+  private endpointManager: EndpointManager | undefined;
 
   constructor(private readonly logger: ILogger) {
     this.client = this.createClient();
@@ -27,6 +29,23 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
         }
       })
     );
+  }
+
+  /**
+   * Set the EndpointManager instance for endpoint resolution
+   * This should be called after construction to inject the dependency
+   */
+  setEndpointManager(manager: EndpointManager): void {
+    this.endpointManager = manager;
+    // Subscribe to endpoint changes
+    this.disposables.push(
+      manager.onEndpointChanged(() => {
+        this.logger.info('Endpoint changed, refreshing Cursor client');
+        this.client = this.createClient();
+      })
+    );
+    // Recreate client with proper endpoints
+    this.client = this.createClient();
   }
 
   async streamCpp(
@@ -104,18 +123,29 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
 
   private createClient(): ApiClient {
     const config = vscode.workspace.getConfiguration('cometixTab');
-    
-    // Let ApiClient handle endpoint resolution based on mode
-    // Only pass override values if explicitly set
     const authToken = config.get<string>('authToken') ?? '';
     const clientKey = config.get<string>('clientKey') ?? '';
 
+    // Get endpoints from EndpointManager if available
+    let baseUrl: string | undefined;
+    let geoCppUrl: string | undefined;
+    
+    if (this.endpointManager) {
+      const resolved = this.endpointManager.resolveEndpoint();
+      baseUrl = resolved.baseUrl;
+      geoCppUrl = resolved.geoCppUrl;
+      this.logger.info(`Initialising Cursor RPC client: mode=${resolved.mode}, baseUrl=${baseUrl}, geoCppUrl=${geoCppUrl}`);
+    } else {
+      this.logger.info('Initialising Cursor RPC client without EndpointManager (using defaults)');
+    }
+
     const finalConfig: Partial<ApiClientConfig> = {
+      baseUrl,
+      geoCppUrl,
       authToken,
       clientKey,
     };
 
-    this.logger.info(`Initialising Cursor RPC client with endpoint mode: ${config.get<string>('endpointMode') || 'auto'}`);
     return new ApiClient(finalConfig);
   }
 

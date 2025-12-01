@@ -1,11 +1,10 @@
 import * as vscode from 'vscode';
-import { EndpointManager } from '../services/endpointManager';
 import { 
-  EndpointMode, 
-  OfficialRegion, 
-  REGION_DISPLAY_NAMES,
-  OFFICIAL_ENDPOINTS,
-} from '../api/endpoints';
+  EndpointManager, 
+  REGION_DISPLAY_NAMES, 
+  OFFICIAL_ENDPOINTS 
+} from '../services/endpointManager';
+import { EndpointMode, OfficialRegion } from '../api/endpoints';
 
 /**
  * Register all endpoint-related commands

@@ -2,18 +2,8 @@ import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { getOrGenerateClientKey } from '../utils/checksum';
 import { Logger } from '../services/logger';
-import { 
-  DEFAULT_BASE_URL, 
-  EndpointKey, 
-  getEndpointUrl,
-  EndpointMode,
-  OfficialRegion,
-  getRegionEndpoint,
-  OFFICIAL_ENDPOINTS,
-  DEFAULT_CPP_CONFIG_URL,
-  normalizeToApi2,
-  isOfficialEndpoint,
-} from './endpoints';
+import { OFFICIAL_ENDPOINTS } from '../services/endpointManager';
+import { EndpointKey, getEndpointUrl } from './endpoints';
 import { 
   StreamCppRequest, 
   StreamCppResponse,
@@ -35,8 +25,13 @@ type AiClient = Client<typeof AiService>;
 type FileSyncClient = Client<typeof FileSyncService>;
 
 export interface ApiClientConfig {
-  baseUrl?: string;
+  /** General API endpoint (HTTP/1.1) - for CppConfig, RefreshTabContext, FileSync */
+  baseUrl: string;
+  /** Completion API endpoint - for StreamCpp (can be regional gcpp or same as baseUrl) */
+  geoCppUrl: string;
+  /** Auth token for API requests */
   authToken: string;
+  /** Client key for API requests */
   clientKey: string;
 }
 
@@ -74,14 +69,10 @@ export class ApiClient {
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
     const vscodeConfig = vscode.workspace.getConfiguration('cometixTab');
 
-    // Resolve base URL based on endpoint mode
-    let baseUrl: string;
-    if (override?.baseUrl && override.baseUrl.trim() !== '') {
-      // Direct override takes highest priority
-      baseUrl = override.baseUrl;
-    } else {
-      baseUrl = this.resolveBaseUrl(vscodeConfig);
-    }
+    // baseUrl and geoCppUrl should be provided by the caller (via EndpointManager)
+    // Fall back to default api2 if not provided
+    const baseUrl = override?.baseUrl?.trim() || OFFICIAL_ENDPOINTS.api2;
+    const geoCppUrl = override?.geoCppUrl?.trim() || baseUrl;
 
     // Auto-generate client key if not provided
     let clientKey = override?.clientKey || vscodeConfig.get<string>('clientKey') || '';
@@ -91,50 +82,14 @@ export class ApiClient {
       vscodeConfig.update('clientKey', clientKey, vscode.ConfigurationTarget.Global);
     }
 
+    this.channel?.appendLine(`[config] ApiClient initialized: baseUrl=${baseUrl}, geoCppUrl=${geoCppUrl}`);
+
     return {
       baseUrl,
+      geoCppUrl,
       authToken: override?.authToken || vscodeConfig.get<string>('authToken') || '',
       clientKey
     };
-  }
-
-  /**
-   * Resolve base URL based on endpoint configuration
-   * 
-   * Logic:
-   * 1. If customEndpoint is set → use custom endpoint
-   * 2. If customEndpoint is not set → use endpointMode (official or auto)
-   */
-  private resolveBaseUrl(vscodeConfig: vscode.WorkspaceConfiguration): string {
-    // Priority: custom endpoint takes precedence if set
-    const customEndpoint = vscodeConfig.get<string>('customEndpoint') || '';
-    const customUrl = customEndpoint.trim();
-    
-    if (customUrl) {
-      this.channel?.appendLine(`[config] Using custom endpoint: ${customUrl}`);
-      // Normalize to api2 if it's an official URL (for HTTP/1.1 compatibility)
-      return isOfficialEndpoint(customUrl) ? normalizeToApi2(customUrl) : customUrl;
-    }
-    
-    // No custom URL set, use official/auto based on endpointMode
-    const endpointMode = (vscodeConfig.get<string>('endpointMode') || 'auto') as EndpointMode;
-    
-    switch (endpointMode) {
-      case 'official': {
-        // Use official endpoint with selected region
-        const region = (vscodeConfig.get<string>('officialRegion') || 'default') as OfficialRegion;
-        const geoCppUrl = getRegionEndpoint(region);
-        this.channel?.appendLine(`[config] Using official endpoint: region=${region}, url=${geoCppUrl}`);
-        return normalizeToApi2(geoCppUrl);
-      }
-      
-      case 'auto':
-      default: {
-        // Use default official endpoint (auto-detection happens at runtime via CppConfig)
-        this.channel?.appendLine(`[config] Using auto endpoint mode, default: ${DEFAULT_BASE_URL}`);
-        return DEFAULT_BASE_URL;
-      }
-    }
   }
 
   private initializeClients() {
@@ -848,10 +803,11 @@ export class ApiClient {
       // 日志记录失败不应影响错误处理
     }
   }
-  getEndpointInfo(): { baseUrl: string; isDefaultUrl: boolean } {
-    const isDefaultUrl = this.config.baseUrl === DEFAULT_BASE_URL;
+  getEndpointInfo(): { baseUrl: string; geoCppUrl: string; isDefaultUrl: boolean } {
+    const isDefaultUrl = this.config.baseUrl === OFFICIAL_ENDPOINTS.api2;
     return {
-      baseUrl: this.config.baseUrl!,
+      baseUrl: this.config.baseUrl,
+      geoCppUrl: this.config.geoCppUrl,
       isDefaultUrl
     };
   }

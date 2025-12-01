@@ -1,29 +1,70 @@
 import * as vscode from 'vscode';
 import { Logger } from './logger';
-import {
-  EndpointMode,
-  OfficialRegion,
-  OFFICIAL_ENDPOINTS,
-  REGION_DISPLAY_NAMES,
-  DEFAULT_BASE_URL,
-  DEFAULT_GEOCPP_URL,
-  DEFAULT_CPP_CONFIG_URL,
-  getRegionEndpoint,
-  isOfficialEndpoint,
-  detectRegionFromUrl,
-  normalizeToApi2,
-} from '../api/endpoints';
+import { EndpointMode, OfficialRegion } from '../api/endpoints';
+
+// ==================== Official Cursor Endpoint URLs (Hardcoded) ====================
+/**
+ * Based on cursor source analysis:
+ * - api2: General backend (HTTP/1.1) - for RefreshTabContext, etc.
+ * - api4: Default for CppConfig and GeoCpp (HTTP/2)
+ * - gcpp: Regional endpoints for code completion (HTTP/2)
+ */
+export const OFFICIAL_ENDPOINTS = {
+  /** General backend - HTTP/1.1, RefreshTabContext, general API */
+  api2: 'https://api2.cursor.sh',
+  
+  /** Default CppConfig/GeoCpp endpoint - HTTP/2 */
+  api4: 'https://api4.cursor.sh',
+  
+  /** Geographic CPP endpoints - regional code completion (HTTP/2) */
+  gcpp: {
+    /** Default - uses api4 (same as cursor default) */
+    default: 'https://api4.cursor.sh',
+    /** United States */
+    us: 'https://us.gcpp.cursor.sh',
+    /** Europe */
+    eu: 'https://eu.gcpp.cursor.sh',
+    /** Asia Pacific */
+    asia: 'https://asia.gcpp.cursor.sh',
+  },
+} as const;
 
 /**
+ * Region display names for UI
+ */
+export const REGION_DISPLAY_NAMES: Record<OfficialRegion, string> = {
+  default: 'Default (api4.cursor.sh)',
+  us: 'United States (us.gcpp.cursor.sh)',
+  eu: 'Europe (eu.gcpp.cursor.sh)',
+  asia: 'Asia Pacific (asia.gcpp.cursor.sh)',
+};
+
+// ==================== Helper Functions ====================
+function getRegionEndpoint(region: OfficialRegion): string {
+  return OFFICIAL_ENDPOINTS.gcpp[region];
+}
+
+function detectRegionFromUrl(url: string): OfficialRegion | null {
+  if (url === OFFICIAL_ENDPOINTS.gcpp.us) {return 'us';}
+  if (url === OFFICIAL_ENDPOINTS.gcpp.eu) {return 'eu';}
+  if (url === OFFICIAL_ENDPOINTS.gcpp.asia) {return 'asia';}
+  if (url === OFFICIAL_ENDPOINTS.api4 || url === OFFICIAL_ENDPOINTS.api2) {return 'default';}
+  return null;
+}
+
+// ==================== Types ====================
+/**
  * Endpoint configuration resolved for use
+ * 
+ * Two types of endpoints:
+ * - baseUrl: General API endpoint (HTTP/1.1) - for CppConfig, RefreshTabContext, FileSync, etc.
+ * - geoCppUrl: Completion API endpoint - for StreamCpp (can be gcpp regional or same as baseUrl)
  */
 export interface ResolvedEndpoint {
-  /** The main base URL for API requests (HTTP/1.1 - api2 format) */
+  /** General API endpoint (HTTP/1.1) - CppConfig, RefreshTabContext, FileSync */
   baseUrl: string;
-  /** The GeoCpp URL for code completion streaming (may be HTTP/2) */
+  /** Completion API endpoint - StreamCpp (can be regional gcpp or same as baseUrl) */
   geoCppUrl: string;
-  /** The CppConfig URL for fetching server configuration */
-  cppConfigUrl: string;
   /** The mode that was used to resolve this endpoint */
   mode: EndpointMode;
   /** If official mode, the selected region */
@@ -144,27 +185,26 @@ export class EndpointManager implements vscode.Disposable {
     const region = this.getOfficialRegion();
     const geoCppUrl = getRegionEndpoint(region);
     
-    this.log(`Official endpoint resolved: region=${region}, geoCppUrl=${geoCppUrl}`);
+    this.log(`Official endpoint resolved: region=${region}, baseUrl=${OFFICIAL_ENDPOINTS.api2}, geoCppUrl=${geoCppUrl}`);
     
     return {
       baseUrl: OFFICIAL_ENDPOINTS.api2,
       geoCppUrl,
-      cppConfigUrl: DEFAULT_CPP_CONFIG_URL,
       mode: 'official',
       region,
     };
   }
 
   private resolveAutoEndpoint(): ResolvedEndpoint {
-    // Use cached auto-detected endpoint if available, otherwise default
-    const geoCppUrl = this.cachedAutoEndpoint || DEFAULT_GEOCPP_URL;
+    // Use cached auto-detected endpoint if available, otherwise default to api4
+    // (api4 is cursor's default for CppConfig and GeoCpp)
+    const geoCppUrl = this.cachedAutoEndpoint || OFFICIAL_ENDPOINTS.api4;
     
-    this.log(`Auto endpoint resolved: geoCppUrl=${geoCppUrl} (cached=${!!this.cachedAutoEndpoint})`);
+    this.log(`Auto endpoint resolved: baseUrl=${OFFICIAL_ENDPOINTS.api2}, geoCppUrl=${geoCppUrl} (cached=${!!this.cachedAutoEndpoint})`);
     
     return {
       baseUrl: OFFICIAL_ENDPOINTS.api2,
       geoCppUrl,
-      cppConfigUrl: DEFAULT_CPP_CONFIG_URL,
       mode: 'auto',
       autoDetectedUrl: this.cachedAutoEndpoint,
     };
@@ -179,35 +219,22 @@ export class EndpointManager implements vscode.Disposable {
       this.log('Custom endpoint not set, using defaults with custom mode');
       return {
         baseUrl: OFFICIAL_ENDPOINTS.api2,
-        geoCppUrl: DEFAULT_GEOCPP_URL,
-        cppConfigUrl: DEFAULT_CPP_CONFIG_URL,
+        geoCppUrl: OFFICIAL_ENDPOINTS.api4,
         mode: 'custom',
         customUrl: undefined,
       };
     }
 
-    // Normalize URL
+    // Normalize URL (remove trailing slash)
     const normalizedUrl = customUrl.replace(/\/$/, '');
     
-    // For custom endpoints, use the same URL for all purposes
-    // unless it's an official endpoint, then we can optimize
-    let baseUrl = normalizedUrl;
-    let geoCppUrl = normalizedUrl;
-    let cppConfigUrl = normalizedUrl;
-    
-    if (isOfficialEndpoint(normalizedUrl)) {
-      // If user provided an official URL, normalize for HTTP version compatibility
-      baseUrl = normalizeToApi2(normalizedUrl);
-      geoCppUrl = normalizedUrl;
-      cppConfigUrl = DEFAULT_CPP_CONFIG_URL;
-    }
-
-    this.log(`Custom endpoint resolved: baseUrl=${baseUrl}, geoCppUrl=${geoCppUrl}`);
+    // For custom endpoints, use the same URL for both baseUrl and geoCppUrl
+    // Custom URL fully overrides both general API and completion API
+    this.log(`Custom endpoint resolved: baseUrl=${normalizedUrl}, geoCppUrl=${normalizedUrl}`);
 
     return {
-      baseUrl,
-      geoCppUrl,
-      cppConfigUrl,
+      baseUrl: normalizedUrl,
+      geoCppUrl: normalizedUrl,
       mode: 'custom',
       customUrl: normalizedUrl,
     };

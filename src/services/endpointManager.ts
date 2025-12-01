@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { Logger } from './logger';
 import {
   EndpointMode,
   OfficialRegion,
@@ -49,14 +50,12 @@ export class EndpointManager implements vscode.Disposable {
 
   private disposables: vscode.Disposable[] = [];
   private globalState: vscode.Memento;
-  private outputChannel: vscode.OutputChannel;
 
   // Cached auto-detected endpoint from server
   private cachedAutoEndpoint: string | undefined;
 
   constructor(context: vscode.ExtensionContext) {
     this.globalState = context.globalState;
-    this.outputChannel = vscode.window.createOutputChannel('CometixTab Endpoint', { log: true });
 
     // Load cached auto-detected endpoint
     this.cachedAutoEndpoint = this.globalState.get<string>(EndpointManager.STORAGE_KEY_AUTO_ENDPOINT);
@@ -78,7 +77,6 @@ export class EndpointManager implements vscode.Disposable {
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
     this._onEndpointChanged.dispose();
-    this.outputChannel.dispose();
   }
 
   /**
@@ -119,17 +117,24 @@ export class EndpointManager implements vscode.Disposable {
 
   /**
    * Resolve the endpoint configuration based on current settings
+   * 
+   * Logic:
+   * 1. If customEndpoint is set → always use custom mode
+   * 2. If customEndpoint is not set → use endpointMode (official or auto)
    */
   resolveEndpoint(): ResolvedEndpoint {
-    const mode = this.getEndpointMode();
+    // Priority: custom endpoint takes precedence if set
+    const customUrl = this.getCustomEndpoint();
+    if (customUrl) {
+      return this.resolveCustomEndpoint();
+    }
     
+    // No custom URL set, use official/auto based on endpointMode
+    const mode = this.getEndpointMode();
     switch (mode) {
       case 'official':
         return this.resolveOfficialEndpoint();
       case 'auto':
-        return this.resolveAutoEndpoint();
-      case 'custom':
-        return this.resolveCustomEndpoint();
       default:
         return this.resolveAutoEndpoint();
     }
@@ -169,8 +174,16 @@ export class EndpointManager implements vscode.Disposable {
     const customUrl = this.getCustomEndpoint();
     
     if (!customUrl) {
-      this.log('Custom endpoint not set, falling back to default');
-      return this.resolveAutoEndpoint();
+      // No custom URL set - use default endpoints but preserve 'custom' mode
+      // so the UI correctly shows user is in custom mode (just unconfigured)
+      this.log('Custom endpoint not set, using defaults with custom mode');
+      return {
+        baseUrl: OFFICIAL_ENDPOINTS.api2,
+        geoCppUrl: DEFAULT_GEOCPP_URL,
+        cppConfigUrl: DEFAULT_CPP_CONFIG_URL,
+        mode: 'custom',
+        customUrl: undefined,
+      };
     }
 
     // Normalize URL
@@ -320,6 +333,6 @@ export class EndpointManager implements vscode.Disposable {
 
   private log(message: string): void {
     const ts = new Date().toISOString();
-    this.outputChannel.appendLine(`[${ts}] [EndpointManager] ${message}`);
+    Logger.getSharedChannel().appendLine(`[${ts}] [EndpointManager] ${message}`);
   }
 }

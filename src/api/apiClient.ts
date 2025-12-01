@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { randomBytes } from 'crypto';
 import { getOrGenerateClientKey } from '../utils/checksum';
+import { Logger } from '../services/logger';
 import { 
   DEFAULT_BASE_URL, 
   EndpointKey, 
@@ -41,7 +42,6 @@ export interface ApiClientConfig {
 
 export class ApiClient {
   private config: ApiClientConfig;
-  private static channel: vscode.OutputChannel | undefined;
   private aiClient: AiClient | null = null;
   private fileSyncClient: FileSyncClient | null = null;
   private readonly fsClientKey: string;
@@ -63,10 +63,12 @@ export class ApiClient {
   constructor(config?: Partial<ApiClientConfig>) {
     this.config = this.loadConfig(config);
     this.fsClientKey = randomBytes(32).toString('hex');
-    if (!ApiClient.channel) {
-      ApiClient.channel = vscode.window.createOutputChannel('CometixTab', { log: true });
-    }
     this.initializeClients();
+  }
+
+  /** Get the shared output channel */
+  private get channel(): vscode.OutputChannel {
+    return Logger.getSharedChannel();
   }
 
   private loadConfig(override?: Partial<ApiClientConfig>): ApiClientConfig {
@@ -97,10 +99,24 @@ export class ApiClient {
   }
 
   /**
-   * Resolve base URL based on endpoint mode configuration
-   * This method determines which endpoint to use based on user settings
+   * Resolve base URL based on endpoint configuration
+   * 
+   * Logic:
+   * 1. If customEndpoint is set → use custom endpoint
+   * 2. If customEndpoint is not set → use endpointMode (official or auto)
    */
   private resolveBaseUrl(vscodeConfig: vscode.WorkspaceConfiguration): string {
+    // Priority: custom endpoint takes precedence if set
+    const customEndpoint = vscodeConfig.get<string>('customEndpoint') || '';
+    const customUrl = customEndpoint.trim();
+    
+    if (customUrl) {
+      this.channel?.appendLine(`[config] Using custom endpoint: ${customUrl}`);
+      // Normalize to api2 if it's an official URL (for HTTP/1.1 compatibility)
+      return isOfficialEndpoint(customUrl) ? normalizeToApi2(customUrl) : customUrl;
+    }
+    
+    // No custom URL set, use official/auto based on endpointMode
     const endpointMode = (vscodeConfig.get<string>('endpointMode') || 'auto') as EndpointMode;
     
     switch (endpointMode) {
@@ -108,31 +124,14 @@ export class ApiClient {
         // Use official endpoint with selected region
         const region = (vscodeConfig.get<string>('officialRegion') || 'default') as OfficialRegion;
         const geoCppUrl = getRegionEndpoint(region);
-        // For Connect RPC we need to use api2 format (HTTP/1.1)
-        // The geoCpp URL is mainly for reference; actual streaming will use normalized URL
-        ApiClient.channel?.appendLine(`[config] Using official endpoint: region=${region}, url=${geoCppUrl}`);
+        this.channel?.appendLine(`[config] Using official endpoint: region=${region}, url=${geoCppUrl}`);
         return normalizeToApi2(geoCppUrl);
       }
-      
-      case 'custom': {
-        // Use custom endpoint
-        const customEndpoint = vscodeConfig.get<string>('customEndpoint') || '';
-        const customUrl = customEndpoint.trim();
-        
-        if (customUrl) {
-          ApiClient.channel?.appendLine(`[config] Using custom endpoint: ${customUrl}`);
-          // Normalize to api2 if it's an official URL (for HTTP/1.1 compatibility)
-          return isOfficialEndpoint(customUrl) ? normalizeToApi2(customUrl) : customUrl;
-        }
-        // Fall through to auto if no custom URL set
-        ApiClient.channel?.appendLine(`[config] Custom endpoint not set, falling back to auto`);
-      }
-      // fallthrough intentional
       
       case 'auto':
       default: {
         // Use default official endpoint (auto-detection happens at runtime via CppConfig)
-        ApiClient.channel?.appendLine(`[config] Using auto endpoint mode, default: ${DEFAULT_BASE_URL}`);
+        this.channel?.appendLine(`[config] Using auto endpoint mode, default: ${DEFAULT_BASE_URL}`);
         return DEFAULT_BASE_URL;
       }
     }
@@ -331,21 +330,21 @@ export class ApiClient {
       
       // 閹存劕濮涢崫宥呯安閸欘亣绶�崙铏圭暆鐟曚椒淇??
       if (status >= 200 && status < 300) {
-        ApiClient.channel?.appendLine(`[${ts}] ??${kind} ??${status}`);
+        this.channel?.appendLine(`[${ts}] ??${kind} ??${status}`);
         this.lastFetchContext = null;
         return;
       }
       
       // 闁挎瑨顕ら崫宥呯安鏉堟挸鍤�€瑰本鏆ｆ穱鈩冧紖
-      ApiClient.channel?.appendLine('');
-      ApiClient.channel?.appendLine(`[${ts}] ??${kind} FAILED`);
-      ApiClient.channel?.appendLine(`[${ts}] Response Status: ${status}`);
+      this.channel?.appendLine('');
+      this.channel?.appendLine(`[${ts}] ??${kind} FAILED`);
+      this.channel?.appendLine(`[${ts}] Response Status: ${status}`);
       
       // 鏉堟挸鍤�€瑰本鏆ｉ惃鍕�嚞濮瑰倷淇??
       if (this.lastFetchContext) {
-        ApiClient.channel?.appendLine(`[${ts}] Request URL: ${this.lastFetchContext.url}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(this.lastFetchContext.headers)}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Body: ${this.lastFetchContext.body}`);
+        this.channel?.appendLine(`[${ts}] Request URL: ${this.lastFetchContext.url}`);
+        this.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(this.lastFetchContext.headers)}`);
+        this.channel?.appendLine(`[${ts}] Request Body: ${this.lastFetchContext.body}`);
       }
       
       // 鏉堟挸鍤�崫宥呯安??
@@ -353,7 +352,7 @@ export class ApiClient {
       headers.forEach((value, key) => {
         responseHeaders[key] = value;
       });
-      ApiClient.channel?.appendLine(`[${ts}] Response Headers: ${JSON.stringify(responseHeaders)}`);
+      this.channel?.appendLine(`[${ts}] Response Headers: ${JSON.stringify(responseHeaders)}`);
 
       // 鏉堟挸鍤�崫宥呯安娴ｆ搫绱欐俊鍌涚亯閺堝�绱?
       if (body !== null && body !== undefined) {
@@ -373,31 +372,31 @@ export class ApiClient {
                 break;
             }
             if (jsonObj !== undefined) {
-              ApiClient.channel?.appendLine(`[${ts}] Response Body (proto->json): ${JSON.stringify(jsonObj)}`);
+              this.channel?.appendLine(`[${ts}] Response Body (proto->json): ${JSON.stringify(jsonObj)}`);
             }
           } catch (e) {
-            ApiClient.channel?.appendLine(`[${ts}] Response Body (proto decode failed): ${String(e)}`);
+            this.channel?.appendLine(`[${ts}] Response Body (proto decode failed): ${String(e)}`);
           }
         } else if (typeof body === 'object') {
           try {
-            ApiClient.channel?.appendLine(`[${ts}] Response Body (json): ${JSON.stringify(body)}`);
+            this.channel?.appendLine(`[${ts}] Response Body (json): ${JSON.stringify(body)}`);
           } catch {
-            ApiClient.channel?.appendLine(`[${ts}] Response Body: <unserializable object>`);
+            this.channel?.appendLine(`[${ts}] Response Body: <unserializable object>`);
           }
         } else if (typeof body === 'string') {
           try {
             const obj = JSON.parse(body);
-            ApiClient.channel?.appendLine(`[${ts}] Response Body (json): ${JSON.stringify(obj)}`);
+            this.channel?.appendLine(`[${ts}] Response Body (json): ${JSON.stringify(obj)}`);
           } catch {
             const preview = body.length > 500 ? body.substring(0, 500) + '...' : body;
-            ApiClient.channel?.appendLine(`[${ts}] Response Body (string): ${preview}`);
+            this.channel?.appendLine(`[${ts}] Response Body (string): ${preview}`);
           }
         }
       } else {
-        ApiClient.channel?.appendLine(`[${ts}] Response Body: <none>`);
+        this.channel?.appendLine(`[${ts}] Response Body: <none>`);
       }
       
-      ApiClient.channel?.appendLine('');
+      this.channel?.appendLine('');
       this.lastFetchContext = null;
     } catch {
       // never throw on logging
@@ -449,7 +448,7 @@ export class ApiClient {
         const json = enriched.toJson();
         this.pendingRequestBodiesById.set(options.generateUuid, json);
         const ts = new Date().toISOString();
-        ApiClient.channel?.appendLine(`[${ts}] StreamCpp (preflight) Request Body (proto->json): ${JSON.stringify(json)}`);
+        this.channel?.appendLine(`[${ts}] StreamCpp (preflight) Request Body (proto->json): ${JSON.stringify(json)}`);
       } catch {}
 
       const iterable = (await this.aiClient.streamCpp(enriched, {
@@ -488,7 +487,7 @@ export class ApiClient {
               if (anyChunk.cursorPredictionTarget) {chunkFields.push('cursorPredictionTarget');}
               if (anyChunk.bindingId) {chunkFields.push(`bindingId:${anyChunk.bindingId}`);}
               
-              ApiClient.channel?.appendLine(
+              this.channel?.appendLine(
                 `[api] StreamCpp chunk #${chunkIndex} for ${options.generateUuid.slice(0,8)}: [${chunkFields.join(', ')}]`
               );
               
@@ -498,7 +497,7 @@ export class ApiClient {
                 const textPreview = anyChunk.text.length > 200 
                   ? `${anyChunk.text.slice(0, 100)}...${anyChunk.text.slice(-100)}`
                   : anyChunk.text;
-                ApiClient.channel?.appendLine(
+                this.channel?.appendLine(
                   `[api] StreamCpp chunk #${chunkIndex} TEXT FULL (${anyChunk.text.length} chars): "${textPreview.replace(/\n/g, '\\n')}"`
                 );
               }
@@ -525,10 +524,10 @@ export class ApiClient {
             }
             if (anyChunk.cursorPredictionTarget) {
               const cpt = anyChunk.cursorPredictionTarget;
-              ApiClient.channel?.appendLine(
+              this.channel?.appendLine(
                 `[api] ⭐⭐⭐ CURSOR_PREDICTION_TARGET RECEIVED ⭐⭐⭐`
               );
-              ApiClient.channel?.appendLine(
+              this.channel?.appendLine(
                 `[api] 📍 CursorPrediction: path="${cpt.relativePath}", line=${cpt.lineNumberOneIndexed}, retrigger=${cpt.shouldRetriggerCpp}, expectedContent="${(cpt.expectedContent || '').slice(0, 50)}"`
               );
               s.buffer.push({
@@ -549,12 +548,12 @@ export class ApiClient {
               break;
             }
           }
-          ApiClient.channel?.appendLine(
+          this.channel?.appendLine(
             `[api] StreamCpp stream completed for ${options.generateUuid.slice(0,8)}: ${chunkIndex} chunks received`
           );
         } catch (innerErr: any) {
           // Log the error for debugging
-          ApiClient.channel?.appendLine(
+          this.channel?.appendLine(
             `[api] StreamCpp stream error for ${options.generateUuid}: ${innerErr?.message ?? String(innerErr)}`
           );
           const s = this.streams.find((x) => x.generationUUID === options.generateUuid);
@@ -583,10 +582,10 @@ export class ApiClient {
     } catch (e: any) {
       // Refresh on enhance calm like cursor
       if (e?.message && String(e.message).includes('ENHANCE_YOUR_CALM')) {
-        ApiClient.channel?.appendLine(`[api] Refreshing client due to ENHANCE_YOUR_CALM for ${options.generateUuid}`);
+        this.channel?.appendLine(`[api] Refreshing client due to ENHANCE_YOUR_CALM for ${options.generateUuid}`);
         this.initializeClients();
       }
-      ApiClient.channel?.appendLine(`[api] Error starting streamCpp: ${e?.message ?? String(e)}`);
+      this.channel?.appendLine(`[api] Error starting streamCpp: ${e?.message ?? String(e)}`);
     }
   }
 
@@ -759,17 +758,17 @@ export class ApiClient {
       const status = typeof res?.status === 'number' ? res.status : 200;
       const responseBody = safeSerialize(res?.message ?? res);
 
-      ApiClient.channel?.appendLine(`[${ts}] ${method} -> ${status} OK`);
+      this.channel?.appendLine(`[${ts}] ${method} -> ${status} OK`);
       const ctx = this.requestContextMap.get(req);
       if (ctx) {
-        ApiClient.channel?.appendLine(`[${ts}]   Request URL: ${ctx.url}`);
-        ApiClient.channel?.appendLine(`[${ts}]   Request Headers: ${JSON.stringify(ctx.headers)}`);
-        ApiClient.channel?.appendLine(`[${ts}]   Request Body (proto->json): ${ctx.body}`);
+        this.channel?.appendLine(`[${ts}]   Request URL: ${ctx.url}`);
+        this.channel?.appendLine(`[${ts}]   Request Headers: ${JSON.stringify(ctx.headers)}`);
+        this.channel?.appendLine(`[${ts}]   Request Body (proto->json): ${ctx.body}`);
       } else {
         const reason = getMissingContextReason(req, res);
-        ApiClient.channel?.appendLine(`[${ts}]   Request context unavailable: ${reason}`);
+        this.channel?.appendLine(`[${ts}]   Request context unavailable: ${reason}`);
       }
-      ApiClient.channel?.appendLine(`[${ts}]   Response Body (proto->json): ${responseBody}`);
+      this.channel?.appendLine(`[${ts}]   Response Body (proto->json): ${responseBody}`);
 
       // 濞撳懘娅庣拠閿嬬湴娑撳﹣绗呴弬?
       this.requestContextMap.delete(req);
@@ -786,15 +785,15 @@ export class ApiClient {
     const startTs = new Date().toISOString();
 
     // stream start
-    ApiClient.channel?.appendLine(`[${startTs}] ${method} -> 200 OK (stream started)`);
+    this.channel?.appendLine(`[${startTs}] ${method} -> 200 OK (stream started)`);
     const startCtx = this.requestContextMap.get(req);
     if (startCtx) {
-      ApiClient.channel?.appendLine(`[${startTs}]   Request URL: ${startCtx.url}`);
-      ApiClient.channel?.appendLine(`[${startTs}]   Request Headers: ${JSON.stringify(startCtx.headers)}`);
-      ApiClient.channel?.appendLine(`[${startTs}]   Request Body (proto->json): ${startCtx.body}`);
+      this.channel?.appendLine(`[${startTs}]   Request URL: ${startCtx.url}`);
+      this.channel?.appendLine(`[${startTs}]   Request Headers: ${JSON.stringify(startCtx.headers)}`);
+      this.channel?.appendLine(`[${startTs}]   Request Body (proto->json): ${startCtx.body}`);
     } else {
       const reason = getMissingContextReason(req, undefined);
-      ApiClient.channel?.appendLine(`[${startTs}]   Request context unavailable: ${reason}`);
+      this.channel?.appendLine(`[${startTs}]   Request context unavailable: ${reason}`);
     }
     this.requestContextMap.delete(req);
 
@@ -806,14 +805,14 @@ export class ApiClient {
           index += 1;
           const ts = new Date().toISOString();
           const body = safeSerialize((chunk as any)?.message ?? chunk);
-          ApiClient.channel?.appendLine(`[${ts}]   Stream chunk #${index} (proto->json): ${body}`);
+          self.channel?.appendLine(`[${ts}]   Stream chunk #${index} (proto->json): ${body}`);
           yield chunk as T;
         }
         const endTs = new Date().toISOString();
-        ApiClient.channel?.appendLine(`[${endTs}] ${method} stream completed (${index} chunk${index === 1 ? '' : 's'})`);
+        self.channel?.appendLine(`[${endTs}] ${method} stream completed (${index} chunk${index === 1 ? '' : 's'})`);
       } catch (err) {
         const ts = new Date().toISOString();
-        ApiClient.channel?.appendLine(`[${ts}] ${method} stream error: ${err instanceof Error ? err.message : String(err)}`);
+        self.channel?.appendLine(`[${ts}] ${method} stream error: ${err instanceof Error ? err.message : String(err)}`);
         await self.logConnectError(req, err);
         throw err;
       }
@@ -828,22 +827,22 @@ export class ApiClient {
       const url = req.url || 'unknown';
       const method = url.split('/').pop() || 'unknown';
 
-      ApiClient.channel?.appendLine('');
-      ApiClient.channel?.appendLine(`[${ts}] ${method} FAILED`);
-      ApiClient.channel?.appendLine(`[${ts}] Error: ${error?.message || String(error)}`);
+      this.channel?.appendLine('');
+      this.channel?.appendLine(`[${ts}] ${method} FAILED`);
+      this.channel?.appendLine(`[${ts}] Error: ${error?.message || String(error)}`);
       if ((error as any)?.code) {
-        ApiClient.channel?.appendLine(`[${ts}] Error Code: ${(error as any).code}`);
+        this.channel?.appendLine(`[${ts}] Error Code: ${(error as any).code}`);
       }
 
       // 输出完整的请求信息
       const errCtx = this.requestContextMap.get(req);
       if (errCtx) {
-        ApiClient.channel?.appendLine(`[${ts}] Request URL: ${errCtx.url}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(errCtx.headers)}`);
-        ApiClient.channel?.appendLine(`[${ts}] Request Body (proto->json): ${errCtx.body}`);
+        this.channel?.appendLine(`[${ts}] Request URL: ${errCtx.url}`);
+        this.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(errCtx.headers)}`);
+        this.channel?.appendLine(`[${ts}] Request Body (proto->json): ${errCtx.body}`);
       }
 
-      ApiClient.channel?.appendLine('');
+      this.channel?.appendLine('');
       this.requestContextMap.delete(req);
     } catch {
       // 日志记录失败不应影响错误处理

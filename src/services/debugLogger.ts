@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { Logger } from './logger';
 
 /**
  * Debug log categories - each can be enabled/disabled independently
@@ -52,7 +53,6 @@ const DEFAULT_CONFIG: DebugLoggerConfig = {
 export class DebugLogger {
   private static instance: DebugLogger | undefined;
   private config: DebugLoggerConfig;
-  private outputChannel: vscode.OutputChannel | undefined;
 
   private constructor(private readonly baseLogger: { info: (msg: string) => void; error: (msg: string) => void }) {
     this.config = { ...DEFAULT_CONFIG };
@@ -69,13 +69,11 @@ export class DebugLogger {
   }
 
   /**
-   * Create a dedicated output channel for verbose debug logs
+   * Get the shared output channel for verbose debug logs
+   * Uses the main Logger's channel instead of creating a separate one
    */
-  createOutputChannel(): vscode.OutputChannel {
-    if (!this.outputChannel) {
-      this.outputChannel = vscode.window.createOutputChannel('Cometix Tab Debug', { log: true });
-    }
-    return this.outputChannel;
+  getOutputChannel(): vscode.OutputChannel {
+    return Logger.getSharedChannel();
   }
 
   /**
@@ -120,9 +118,9 @@ export class DebugLogger {
 
     this.baseLogger.info(fullMessage);
 
-    // Also log to dedicated output channel if available
-    if (this.outputChannel && this.config.verbosePayloads) {
-      this.outputChannel.appendLine(fullMessage);
+    // Also log to dedicated output channel if verbose mode is enabled
+    if (this.config.verbosePayloads) {
+      Logger.getSharedChannel().appendLine(fullMessage);
     }
   }
 

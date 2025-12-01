@@ -24,7 +24,8 @@ import { EndpointManager } from './services/endpointManager';
 import { TriggerSource } from './context/types';
 // UI components
 import { StatusBar } from './ui/statusBar';
-import { MenuPanel, showSnoozePicker } from './ui/menuPanel';
+import { StatusBarPicker } from './ui/statusBarPicker';
+import { showSnoozePicker } from './ui/menuPanel';
 import { SnoozeService } from './services/snoozeService';
 import { ServerConfigService } from './services/serverConfigService';
 import { checkAndPromptProposedApiOnStartup, resetIgnoreProposalCheck } from './services/productJsonPatcher';
@@ -138,11 +139,23 @@ export function activate(context: vscode.ExtensionContext) {
 	const snoozeService = SnoozeService.getInstance();
 	const serverConfigService = ServerConfigService.getInstance();
 	const statusBar = new StatusBar();
-	const menuPanel = new MenuPanel();
+	const statusBarPicker = new StatusBarPicker();
+
+	// Get telemetry service from container for UI integration
+	const telemetryService = container.resolve<TelemetryService>('telemetryService');
+
+	// Wire up StatusBar with services
+	statusBar.setTelemetryService(telemetryService);
+	statusBar.setEndpointManager(endpointManager);
+
+	// Wire up StatusBarPicker with services
+	statusBarPicker.setTelemetryService(telemetryService);
+	statusBarPicker.setEndpointManager(endpointManager);
 
 	context.subscriptions.push(snoozeService);
 	context.subscriptions.push(serverConfigService);
 	context.subscriptions.push(statusBar);
+	context.subscriptions.push(statusBarPicker);
 
 	// Register new commands
 	context.subscriptions.push(
@@ -158,7 +171,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('cometix-tab.showStatusMenu', () => {
-			menuPanel.show();
+			statusBarPicker.show();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('cometix-tab.resetStatistics', () => {
+			telemetryService.resetStatistics();
+			vscode.window.showInformationMessage('Cometix Tab: Statistics reset');
 		})
 	);
 

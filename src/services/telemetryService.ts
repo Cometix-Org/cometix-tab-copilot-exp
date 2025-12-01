@@ -3,6 +3,36 @@ import { ILogger } from '../context/contracts';
 import { TriggerSource } from '../context/types';
 
 /**
+ * Session statistics for display in status bar
+ */
+export interface SessionStatistics {
+  /** Total number of completion triggers */
+  triggerCount: number;
+  /** Number of completions shown to user */
+  suggestionCount: number;
+  /** Number of completions fully accepted */
+  acceptCount: number;
+  /** Number of completions rejected */
+  rejectCount: number;
+  /** Number of partial accepts */
+  partialAcceptCount: number;
+  /** Total characters accepted */
+  totalCharsAccepted: number;
+  /** Trigger counts by source */
+  triggersBySource: Record<string, number>;
+  /** Cursor jump/prediction count */
+  cursorJumpCount: number;
+  /** Files synced count */
+  filesSyncedCount: number;
+  /** Session start time */
+  sessionStartTime: number;
+  /** Average generation time in ms */
+  avgGenerationTimeMs: number;
+  /** Success rate (accepted / shown) */
+  acceptRate: number;
+}
+
+/**
  * Event types for CPP telemetry
  */
 export enum CppEventType {
@@ -110,6 +140,14 @@ type CppEvent =
 const MAX_EVENTS = 100;
 
 /**
+ * Cursor jump event type
+ */
+export enum CursorJumpType {
+  Prediction = 'prediction',
+  NextEdit = 'next_edit',
+}
+
+/**
  * Telemetry service for tracking CPP events.
  * Events are logged locally and can be sent to the server.
  */
@@ -117,11 +155,30 @@ export class TelemetryService implements vscode.Disposable {
   private events: CppEvent[] = [];
   private requestStartTimes = new Map<string, number>();
 
+  // Statistics counters
+  private stats = {
+    triggerCount: 0,
+    suggestionCount: 0,
+    acceptCount: 0,
+    rejectCount: 0,
+    partialAcceptCount: 0,
+    totalCharsAccepted: 0,
+    triggersBySource: {} as Record<string, number>,
+    cursorJumpCount: 0,
+    filesSyncedCount: 0,
+    generationTimes: [] as number[],
+    sessionStartTime: Date.now(),
+  };
+
+  private readonly _onStatsChanged = new vscode.EventEmitter<SessionStatistics>();
+  public readonly onStatsChanged = this._onStatsChanged.event;
+
   constructor(private readonly logger: ILogger) {}
 
   dispose(): void {
     this.events = [];
     this.requestStartTimes.clear();
+    this._onStatsChanged.dispose();
   }
 
   /**
@@ -153,6 +210,12 @@ export class TelemetryService implements vscode.Disposable {
       },
     };
     this.addEvent(event);
+    
+    // Update statistics
+    this.stats.triggerCount++;
+    this.stats.triggersBySource[source] = (this.stats.triggersBySource[source] || 0) + 1;
+    this.notifyStatsChanged();
+    
     this.logger.info(
       `[Telemetry] Trigger: ${source} at ${position.line + 1}:${position.character + 1}`
     );
@@ -177,6 +240,11 @@ export class TelemetryService implements vscode.Disposable {
       lineCount,
     };
     this.addEvent(event);
+    
+    // Update statistics
+    this.stats.suggestionCount++;
+    this.notifyStatsChanged();
+    
     this.logger.info(
       `[Telemetry] Suggestion shown: ${suggestionText.length} chars, ${lineCount} lines`
     );
@@ -195,6 +263,12 @@ export class TelemetryService implements vscode.Disposable {
       acceptedLength,
     };
     this.addEvent(event);
+    
+    // Update statistics
+    this.stats.acceptCount++;
+    this.stats.totalCharsAccepted += acceptedLength;
+    this.notifyStatsChanged();
+    
     this.logger.info(`[Telemetry] Accept: ${acceptedLength} chars`);
   }
 
@@ -211,6 +285,11 @@ export class TelemetryService implements vscode.Disposable {
       reason,
     };
     this.addEvent(event);
+    
+    // Update statistics
+    this.stats.rejectCount++;
+    this.notifyStatsChanged();
+    
     this.logger.info(`[Telemetry] Reject${reason ? `: ${reason}` : ''}`);
   }
 
@@ -233,6 +312,12 @@ export class TelemetryService implements vscode.Disposable {
       kind,
     };
     this.addEvent(event);
+    
+    // Update statistics
+    this.stats.partialAcceptCount++;
+    this.stats.totalCharsAccepted += acceptedLength;
+    this.notifyStatsChanged();
+    
     this.logger.info(`[Telemetry] Partial accept: ${acceptedLength} chars, kind=${kind}`);
   }
 
@@ -252,6 +337,17 @@ export class TelemetryService implements vscode.Disposable {
       success,
     };
     this.addEvent(event);
+    
+    // Update statistics
+    if (success && durationMs > 0) {
+      this.stats.generationTimes.push(durationMs);
+      // Keep only last 100 times for average
+      if (this.stats.generationTimes.length > 100) {
+        this.stats.generationTimes.shift();
+      }
+      this.notifyStatsChanged();
+    }
+    
     this.logger.info(
       `[Telemetry] Generation ${success ? 'succeeded' : 'failed'} in ${Math.round(durationMs)}ms`
     );
@@ -297,6 +393,76 @@ export class TelemetryService implements vscode.Disposable {
    */
   clearEvents(): void {
     this.events = [];
+  }
+
+  /**
+   * Record a cursor jump event (prediction or next edit)
+   */
+  recordCursorJump(type: CursorJumpType): void {
+    this.stats.cursorJumpCount++;
+    this.notifyStatsChanged();
+    this.logger.info(`[Telemetry] Cursor jump: ${type}`);
+  }
+
+  /**
+   * Record a file sync event
+   */
+  recordFileSync(): void {
+    this.stats.filesSyncedCount++;
+    this.notifyStatsChanged();
+  }
+
+  /**
+   * Get current session statistics
+   */
+  getStatistics(): SessionStatistics {
+    const avgTime = this.stats.generationTimes.length > 0
+      ? this.stats.generationTimes.reduce((a, b) => a + b, 0) / this.stats.generationTimes.length
+      : 0;
+    
+    const acceptRate = this.stats.suggestionCount > 0
+      ? (this.stats.acceptCount + this.stats.partialAcceptCount) / this.stats.suggestionCount
+      : 0;
+
+    return {
+      triggerCount: this.stats.triggerCount,
+      suggestionCount: this.stats.suggestionCount,
+      acceptCount: this.stats.acceptCount,
+      rejectCount: this.stats.rejectCount,
+      partialAcceptCount: this.stats.partialAcceptCount,
+      totalCharsAccepted: this.stats.totalCharsAccepted,
+      triggersBySource: { ...this.stats.triggersBySource },
+      cursorJumpCount: this.stats.cursorJumpCount,
+      filesSyncedCount: this.stats.filesSyncedCount,
+      sessionStartTime: this.stats.sessionStartTime,
+      avgGenerationTimeMs: Math.round(avgTime),
+      acceptRate: Math.round(acceptRate * 100) / 100,
+    };
+  }
+
+  /**
+   * Reset session statistics
+   */
+  resetStatistics(): void {
+    this.stats = {
+      triggerCount: 0,
+      suggestionCount: 0,
+      acceptCount: 0,
+      rejectCount: 0,
+      partialAcceptCount: 0,
+      totalCharsAccepted: 0,
+      triggersBySource: {},
+      cursorJumpCount: 0,
+      filesSyncedCount: 0,
+      generationTimes: [],
+      sessionStartTime: Date.now(),
+    };
+    this.notifyStatsChanged();
+    this.logger.info('[Telemetry] Statistics reset');
+  }
+
+  private notifyStatsChanged(): void {
+    this._onStatsChanged.fire(this.getStatistics());
   }
 
   /**

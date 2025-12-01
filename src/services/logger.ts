@@ -7,8 +7,46 @@ export enum LogLevel {
   Error = 'error',
 }
 
+/**
+ * Unified logger for the extension. All components should use this single channel.
+ */
 export class Logger implements vscode.Disposable, ILogger {
-  private readonly channel = vscode.window.createOutputChannel('Cursor Tab', { log: true });
+  private static instance: Logger | undefined;
+  private readonly channel: vscode.OutputChannel;
+
+  constructor() {
+    // Reuse existing channel if singleton already exists
+    if (Logger.instance) {
+      this.channel = Logger.instance.channel;
+    } else {
+      this.channel = vscode.window.createOutputChannel('Cometix Tab', { log: true });
+      Logger.instance = this;
+    }
+  }
+
+  /**
+   * Get the singleton Logger instance. Creates one if it doesn't exist.
+   */
+  static getInstance(): Logger {
+    if (!Logger.instance) {
+      Logger.instance = new Logger();
+    }
+    return Logger.instance;
+  }
+
+  /**
+   * Get the shared output channel for direct access by other components
+   */
+  getChannel(): vscode.OutputChannel {
+    return this.channel;
+  }
+
+  /**
+   * Static method to get the shared channel (creates Logger if needed)
+   */
+  static getSharedChannel(): vscode.OutputChannel {
+    return Logger.getInstance().channel;
+  }
 
   info(message: string): void {
     this.write(LogLevel.Info, message);
@@ -37,5 +75,6 @@ export class Logger implements vscode.Disposable, ILogger {
 
   dispose(): void {
     this.channel.dispose();
+    Logger.instance = undefined;
   }
 }

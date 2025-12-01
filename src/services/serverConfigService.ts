@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { CppConfigResponse, CppConfigResponse_Heuristic } from '../rpc/cursor-tab_pb';
+import { Logger } from './logger';
 
 /**
  * Cached server configuration from CppConfig response
@@ -144,9 +145,9 @@ export class ServerConfigService implements vscode.Disposable {
   async showConfig(): Promise<void> {
     const lines = this.formatForDisplay();
     
-    // Create or get output channel
-    const channel = vscode.window.createOutputChannel('Cometix Tab - Server Config');
-    channel.clear();
+    // Use the shared Logger channel
+    const channel = Logger.getSharedChannel();
+    channel.appendLine(''); // separator
     lines.forEach(line => channel.appendLine(line));
     channel.show(true);
   }

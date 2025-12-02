@@ -192,6 +192,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
 
     // If no recent edit for this document, try document switch trigger
     if (!changeInfo) {
+      this.logger.info(`[InlineEditTriggerer] LineChange skipped: no recent edit for document`);
       this.maybeTriggerOnDocumentSwitch(e, isSameDoc);
       return;
     }
@@ -200,6 +201,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
 
     // Check if within the trigger window after a change
     if (timeSinceEdit >= this.config.triggerAfterChangeWindowMs) {
+      this.logger.info(`[InlineEditTriggerer] LineChange skipped: outside trigger window (${timeSinceEdit}ms > ${this.config.triggerAfterChangeWindowMs}ms)`);
       this.maybeTriggerOnDocumentSwitch(e, isSameDoc);
       return;
     }
@@ -208,6 +210,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
     const timeSinceTrigger = now - this.lastTriggerTime;
     if (timeSinceTrigger >= this.config.triggerAfterChangeWindowMs) {
       // Haven't triggered recently - might be a non-typing cursor move
+      this.logger.info(`[InlineEditTriggerer] LineChange skipped: no recent trigger (${timeSinceTrigger}ms > ${this.config.triggerAfterChangeWindowMs}ms)`);
       this.maybeTriggerOnDocumentSwitch(e, isSameDoc);
       return;
     }
@@ -217,6 +220,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
     // Check same-line cooldown
     const lastTriggerForLine = changeInfo.lineNumberTriggers.get(selectionLine);
     if (lastTriggerForLine !== undefined && now - lastTriggerForLine < this.config.sameLineCooldownMs) {
+      this.logger.info(`[InlineEditTriggerer] LineChange skipped: same-line cooldown (${now - lastTriggerForLine}ms < ${this.config.sameLineCooldownMs}ms)`);
       return;
     }
 
@@ -236,6 +240,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
     // Debounce rapid selection changes
     const N_ALLOWED_IMMEDIATE = 2; // First is from edit, second is user intentional movement
     if (changeInfo.consecutiveSelectionChanges < N_ALLOWED_IMMEDIATE) {
+      this.logger.info(`[InlineEditTriggerer] Triggering on line change (immediate, consecutive=${changeInfo.consecutiveSelectionChanges})`);
       this.triggerSuggestion(e.textEditor.document, e.selections[0].start, TriggerSource.LineChange);
     } else {
       // Debounce
@@ -243,6 +248,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
         clearTimeout(changeInfo.debounceTimeout);
       }
       changeInfo.debounceTimeout = setTimeout(() => {
+        this.logger.info(`[InlineEditTriggerer] Triggering on line change (debounced)`);
         this.triggerSuggestion(e.textEditor.document, e.selections[0].start, TriggerSource.LineChange);
       }, this.config.selectionChangeDebounceMs);
     }
@@ -306,6 +312,7 @@ export class InlineEditTriggerer implements vscode.Disposable {
     position: vscode.Position,
     triggerSource: TriggerSource
   ): void {
+    this.logger.info(`[InlineEditTriggerer] triggerSuggestion: source=${triggerSource}, line=${position.line}, col=${position.character}`);
     this.recordTrigger();
     this._onTrigger.fire({ document, position, triggerSource });
     

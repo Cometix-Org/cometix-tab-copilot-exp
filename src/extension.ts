@@ -13,6 +13,7 @@ import { FilesyncUpdatesStore } from './services/filesyncUpdatesStore';
 import { registerNextEditCommand } from './commands/nextEditCommand';
 import { registerCursorPredictionCommand } from './commands/cursorPredictionCommand';
 import { registerEndpointCommands } from './commands/endpointCommands';
+import { registerModelCommands } from './commands/modelCommands';
 // New services for enhanced functionality
 import { DebounceManager } from './services/debounceManager';
 import { RecentFilesTracker } from './services/recentFilesTracker';
@@ -127,6 +128,10 @@ export function activate(context: vscode.ExtensionContext) {
 		() => rpcClient.refreshClient()
 	);
 	context.subscriptions.push(...endpointCommandDisposables);
+
+	// Register model commands
+	const modelCommandDisposables = registerModelCommands(context);
+	context.subscriptions.push(...modelCommandDisposables);
 
 	// Initialize UI components
 	const snoozeService = SnoozeService.getInstance();

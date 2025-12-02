@@ -425,6 +425,9 @@ export class CursorStateMachine implements vscode.Disposable {
       ? this.lspSuggestionsTracker.getRelevantSuggestions(ctx.document.uri.toString())
       : undefined;
 
+    // Get configured model
+    const configuredModel = vscode.workspace.getConfiguration('cometixTab').get<string>('model', 'auto');
+
     try {
       const chunks = await withRetry(
         () =>
@@ -444,6 +447,8 @@ export class CursorStateMachine implements vscode.Disposable {
               lspSuggestions,
               enableMoreContext: this.flags.enableAdditionalFilesContext,
               isManualTrigger,
+              // Model selection from config
+              modelName: configuredModel,
               // Workspace storage fields - matching Cursor's behavior
               workspaceId: this.workspaceStorage?.getWorkspaceId(),
               storedControlToken: this.workspaceStorage?.getControlToken(),

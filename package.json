@@ -84,6 +84,10 @@
       {
         "command": "cometix-tab.enableProposedApi",
         "title": "Cometix Tab: Enable Proposed API"
+      },
+      {
+        "command": "cometix-tab.selectModel",
+        "title": "Cometix Tab: Select Completion Model"
       }
     ],
     "keybindings": [
@@ -161,6 +165,21 @@
           "type": "string",
           "default": "",
           "description": "Custom endpoint URL. Only used when endpointMode is 'custom'."
+        },
+        "cometixTab.model": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "fast",
+            "advanced"
+          ],
+          "enumDescriptions": [
+            "Automatically select the best model based on context",
+            "Fast model for quick completions with lower latency",
+            "Advanced model for higher quality completions"
+          ],
+          "default": "auto",
+          "description": "AI completion model selection. Auto lets the server decide, Fast prioritizes speed, Advanced prioritizes quality."
         },
         "cometixTab.authToken": {
           "type": "string",

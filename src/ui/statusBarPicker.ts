@@ -20,6 +20,7 @@ const CMD_SHOW_LOGS = 'cometix-tab.showLogs';
 const CMD_OPEN_SETTINGS = 'workbench.action.openSettings';
 const CMD_SELECT_ENDPOINT = 'cometix-tab.selectEndpointMode';
 const CMD_SELECT_REGION = 'cometix-tab.selectRegion';
+const CMD_SELECT_MODEL = 'cometix-tab.selectModel';
 const CMD_SNOOZE = 'cometix-tab.showSnoozePicker';
 const CMD_CANCEL_SNOOZE = 'cometix-tab.cancelSnooze';
 const CMD_RESET_STATS = 'cometix-tab.resetStatistics';
@@ -112,6 +113,13 @@ export class StatusBarPicker implements vscode.Disposable {
       });
       items.push(...this.buildTriggerSourceItems(stats.triggersBySource));
     }
+
+    // === Model Section ===
+    items.push({
+      label: 'Model',
+      kind: vscode.QuickPickItemKind.Separator
+    });
+    items.push(...this.buildModelItems());
 
     // === Endpoint Section ===
     items.push({
@@ -249,6 +257,30 @@ export class StatusBarPicker implements vscode.Disposable {
         description: `${count} triggers`
       });
     }
+
+    return items;
+  }
+
+  /**
+   * Build model selection items
+   */
+  private buildModelItems(): StatusPickerItem[] {
+    const items: StatusPickerItem[] = [];
+    const config = vscode.workspace.getConfiguration('cometixTab');
+    const currentModel = config.get<string>('model', 'auto');
+
+    const modelLabels: Record<string, { label: string; description: string }> = {
+      'auto': { label: 'Auto', description: 'Server decides the best model' },
+      'fast': { label: 'Fast', description: 'Lower latency, quick completions' },
+      'advanced': { label: 'Advanced', description: 'Higher quality completions' },
+    };
+
+    const info = modelLabels[currentModel] || { label: currentModel, description: '' };
+    items.push({
+      label: `$(beaker) Current Model: ${info.label}`,
+      description: info.description,
+      action: CMD_SELECT_MODEL
+    });
 
     return items;
   }

@@ -152,6 +152,10 @@ export class StatusBar implements vscode.Disposable {
     // Set context for menus
     void vscode.commands.executeCommand('setContext', 'cometix-tab.enabled', enabled);
 
+    // Get current model
+    const model = vscodeConfig.get<string>('model', 'auto');
+    const modelLabel = this.getModelLabel(model);
+
     // Determine status and update display
     if (!enabled) {
       this.statusBarItem.text = `${StatusIcon.Disabled} Cometix`;
@@ -165,19 +169,19 @@ export class StatusBar implements vscode.Disposable {
     } else {
       switch (this.currentState) {
         case StatusBarState.Working:
-          this.statusBarItem.text = `${StatusIcon.Working} Cometix`;
+          this.statusBarItem.text = `${StatusIcon.Working} Cometix [${modelLabel}]`;
           this.statusBarItem.backgroundColor = undefined;
           break;
 
         case StatusBarState.Error:
-          this.statusBarItem.text = `${StatusIcon.Error} Cometix`;
+          this.statusBarItem.text = `${StatusIcon.Error} Cometix [${modelLabel}]`;
           this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
           this.statusBarItem.command = 'cometix-tab.showLogs';
           break;
 
         case StatusBarState.Idle:
         default:
-          this.statusBarItem.text = `${StatusIcon.Logo} Cometix`;
+          this.statusBarItem.text = `${StatusIcon.Logo} Cometix [${modelLabel}]`;
           this.statusBarItem.backgroundColor = undefined;
           this.statusBarItem.command = 'cometix-tab.showStatusMenu';
           break;
@@ -235,7 +239,36 @@ export class StatusBar implements vscode.Disposable {
       if (this.lastStats.avgGenerationTimeMs > 0) {
         md.appendMarkdown(`$(watch) **Avg Generation Time:** ${this.lastStats.avgGenerationTimeMs}ms\n\n`);
       }
+
+      // Trigger sources breakdown
+      const triggersBySource = this.lastStats.triggersBySource;
+      if (Object.keys(triggersBySource).length > 0) {
+        md.appendMarkdown(`---\n\n`);
+        md.appendMarkdown(`#### $(zap) Triggers by Source\n\n`);
+        
+        // Sort by count descending
+        const sorted = Object.entries(triggersBySource)
+          .sort(([, a], [, b]) => b - a);
+        
+        for (const [source, count] of sorted) {
+          const icon = this.getTriggerSourceIcon(source);
+          const label = this.formatTriggerSourceName(source);
+          md.appendMarkdown(`${icon} **${label}:** ${count}\n\n`);
+        }
+      }
     }
+
+    // Model section
+    const model = vscode.workspace.getConfiguration('cometixTab').get<string>('model', 'auto');
+    const modelLabels: Record<string, string> = {
+      'auto': 'Auto (Server decides)',
+      'fast': 'Fast (Lower latency)',
+      'advanced': 'Advanced (Higher quality)',
+    };
+    md.appendMarkdown(`---\n\n`);
+    md.appendMarkdown(`#### $(beaker) Model\n\n`);
+    md.appendMarkdown(`$(symbol-method) **Current Model:** ${modelLabels[model] || model}\n\n`);
+    md.appendMarkdown(`[$(pencil) Change Model](command:cometix-tab.selectModel)\n\n`);
 
     // Endpoint section
     md.appendMarkdown(`---\n\n`);
@@ -279,6 +312,58 @@ export class StatusBar implements vscode.Disposable {
     md.appendMarkdown(`[$(settings-gear) Open Settings](command:workbench.action.openSettings?%22cometixTab%22)\n\n`);
 
     return md;
+  }
+
+  /**
+   * Get short label for model
+   */
+  private getModelLabel(model: string): string {
+    const labels: Record<string, string> = {
+      'auto': 'Auto',
+      'fast': 'Fast',
+      'advanced': 'Adv',
+    };
+    return labels[model] || model;
+  }
+
+  /**
+   * Get icon for trigger source
+   */
+  private getTriggerSourceIcon(source: string): string {
+    const icons: Record<string, string> = {
+      'unknown': '$(question)',
+      'line_change': '$(edit)',
+      'typing': '$(keyboard)',
+      'option_hold': '$(key)',
+      'lint_errors': '$(error)',
+      'parameter_hints': '$(symbol-parameter)',
+      'cursor_prediction': '$(arrow-right)',
+      'manual': '$(play)',
+      'editor_change': '$(window)',
+      'lsp_suggestions': '$(symbol-method)',
+    };
+    return icons[source] || '$(circle-outline)';
+  }
+
+  /**
+   * Format trigger source name for display
+   */
+  private formatTriggerSourceName(source: string): string {
+    const labels: Record<string, string> = {
+      'unknown': 'Unknown',
+      'line_change': 'Line Change',
+      'typing': 'Typing',
+      'option_hold': 'Option Hold',
+      'lint_errors': 'Linter Errors',
+      'parameter_hints': 'Parameter Hints',
+      'cursor_prediction': 'Cursor Prediction',
+      'manual': 'Manual Trigger',
+      'editor_change': 'Editor Change',
+      'lsp_suggestions': 'LSP Suggestions',
+    };
+    return labels[source] || source
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
   }
 
   /**

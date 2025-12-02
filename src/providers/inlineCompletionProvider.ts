@@ -12,7 +12,14 @@ export class CursorInlineCompletionProvider implements vscode.InlineCompletionIt
   constructor(
     private readonly stateMachine: CursorStateMachine,
     private readonly logger: ILogger
-  ) {}
+  ) {
+    // Listen for cached suggestions and trigger refresh
+    // This ensures VS Code re-requests completions when a superseded request's result is cached
+    this.stateMachine.onSuggestionCached(() => {
+      this.logger.info('[InlineCompletion] Cached suggestion available, triggering refresh');
+      this._onDidChange.fire();
+    });
+  }
 
   /**
    * Trigger a refresh of inline completions
@@ -55,11 +62,22 @@ export class CursorInlineCompletionProvider implements vscode.InlineCompletionIt
         arguments: [suggestion.cursorPredictionTarget],
       };
     } else {
+      // Pass nextEditActionId and acceptedLength for telemetry and follow-up handling
       item.command = {
         title: 'Cursor Tab Accept',
         command: 'cometix-tab.inlineAccept',
-        arguments: [suggestion.requestId, suggestion.bindingId],
+        arguments: [
+          suggestion.requestId,
+          suggestion.bindingId,
+          suggestion.nextEditActionId,
+          suggestion.text.length,  // acceptedLength for telemetry
+        ],
       };
+    }
+    
+    // Log if there's a next edit available
+    if (suggestion.nextEditActionId) {
+      this.logger.info(`[InlineCompletion] 🔄 Next edit available: actionId=${suggestion.nextEditActionId}`);
     }
     
     // Proposed API additions

@@ -51,6 +51,8 @@ export interface SuggestionResult {
   readonly cursorPredictionTarget?: CursorPredictionTargetInfo;
   // If true, this suggestion is just a cursor jump hint (no actual code edit)
   readonly isCursorJumpHint?: boolean;
+  // If set, indicates there's a next edit to show after this one is accepted
+  readonly nextEditActionId?: string;
 }
 
 export interface CursorPredictionTargetInfo {
@@ -91,6 +93,8 @@ const DEFAULT_MODEL_INFO: ModelInfo = {
 interface FollowupSession {
   readonly document: vscode.Uri;
   readonly queue: RawSuggestion[];
+  /** Document version when followups were cached - used to detect stale cache */
+  documentVersion?: number;
 }
 
 /**
@@ -148,6 +152,11 @@ export class CursorStateMachine implements vscode.Disposable {
   private requestSeed = 0;
   private flags: CursorFeatureFlags;
   private lastAcceptedRequestId: string | undefined;
+  /** Track requestIds that were accepted via item.command to avoid duplicate telemetry */
+  private readonly acceptedViaCommand = new Set<string>();
+  
+  /** Track requestIds that were superseded by newer requests (should complete but cache results) */
+  private readonly supersededRequests = new Set<string>();
   // Track current active request per document to ignore stale responses (like Cursor's this.db pattern)
   private currentRequestByDocument = new Map<string, string>();
   
@@ -164,6 +173,10 @@ export class CursorStateMachine implements vscode.Disposable {
   private pendingTriggerSource?: TriggerSource;
   private pendingTriggerTimestamp = 0;
   private readonly pendingTriggerMaxAgeMs = 500; // Max age for pending trigger
+  
+  /** Event emitter for notifying provider when cached suggestions are available */
+  private readonly _onSuggestionCached = new vscode.EventEmitter<void>();
+  readonly onSuggestionCached = this._onSuggestionCached.event;
 
   constructor(
     private readonly tracker: IDocumentTracker,
@@ -209,10 +222,13 @@ export class CursorStateMachine implements vscode.Disposable {
     this.followups.clear();
     this.nextActionCache.clear();
     this.currentRequestByDocument.clear();
+    this.supersededRequests.clear();
+    this.acceptedViaCommand.clear();
     this.pendingNextAction = undefined;
     this.heuristics.dispose();
     this.inlineEditTriggerer.dispose();
     this.suggestionCache.length = 0;
+    this._onSuggestionCached.dispose();
   }
 
   /**
@@ -236,6 +252,10 @@ export class CursorStateMachine implements vscode.Disposable {
     }
     
     this.logger.info(`[Cpp] Added suggestion to cache (size: ${this.suggestionCache.length})`);
+    
+    // Notify provider that a cached suggestion is available
+    // This triggers VS Code to re-request completions, which will hit the cache
+    this._onSuggestionCached.fire();
   }
 
   /**
@@ -243,16 +263,24 @@ export class CursorStateMachine implements vscode.Disposable {
    * Returns the most recent matching suggestion and removes it from cache
    */
   private popCachedSuggestion(documentUri: string, documentVersion: number): SuggestionResult | null {
-    // Find most recent matching suggestion (same document, version not older than current - 1)
-    // Allow version difference of 1 to handle minor edits
+    // Find most recent matching suggestion (same document, version not too old)
+    // Allow version difference of 3 to handle rapid edits and linter triggers
+    const maxVersionDiff = 3;
     for (let i = this.suggestionCache.length - 1; i >= 0; i--) {
       const cached = this.suggestionCache[i];
-      if (cached.documentUri === documentUri && 
-          cached.documentVersion >= documentVersion - 1) {
+      const versionDiff = documentVersion - cached.documentVersion;
+      if (cached.documentUri === documentUri && versionDiff <= maxVersionDiff && versionDiff >= 0) {
         // Remove from cache
         this.suggestionCache.splice(i, 1);
-        this.logger.info(`[Cpp] Cache hit! Using cached suggestion (cache size: ${this.suggestionCache.length})`);
+        this.logger.info(`[Cpp] ✅ Cache hit! Using cached suggestion (versionDiff=${versionDiff}, cache size: ${this.suggestionCache.length})`);
         return cached.suggestion;
+      }
+    }
+    // Log cache miss details for debugging
+    if (this.suggestionCache.length > 0) {
+      const matching = this.suggestionCache.filter(c => c.documentUri === documentUri);
+      if (matching.length > 0) {
+        this.logger.info(`[Cpp] ❌ Cache miss: found ${matching.length} cached for doc but version mismatch (current=${documentVersion}, cached=${matching.map(c => c.documentVersion).join(',')})`);
       }
     }
     return null;
@@ -279,12 +307,54 @@ export class CursorStateMachine implements vscode.Disposable {
       return null;
     }
 
-    // Check cache first - similar to Cursor's this.O.popCacheHit pattern
-    // This is the key to not losing suggestions when requests are superseded
-    const cachedSuggestion = this.popCachedSuggestion(
-      ctx.document.uri.toString(),
-      ctx.document.version
-    );
+    const docKey = ctx.document.uri.toString();
+    
+    // PRIORITY 1: Check for cached followup edits from previous multidiff stream
+    // Followup edits take priority because they are the "next edit" the user expects after accepting
+    // This must be checked BEFORE suggestion cache to avoid superseded requests stealing the slot
+    const followupSession = this.followups.get(docKey);
+    if (followupSession && followupSession.queue.length > 0) {
+      // IMPORTANT: Invalidate cached followups if document version changed
+      // The cached line numbers are based on the original document and become stale after ANY edit
+      const versionDiff = ctx.document.version - (followupSession.documentVersion ?? 0);
+      
+      // Only use followup when document hasn't changed much (versionDiff <= 1)
+      // After accepting an edit, version increases by 1, so we allow that
+      if (versionDiff > 1) {
+        this.logger.info(`[Cpp] 📦 Clearing stale followup cache (versionDiff=${versionDiff}, cached=${followupSession.queue.length})`);
+        this.followups.delete(docKey);
+        // Also clear suggestion cache for this document since followups are stale
+        this.clearSuggestionCache(docKey);
+      } else {
+        const nextEdit = followupSession.queue.shift();
+        if (nextEdit) {
+          this.logger.info(`[Cpp] 📦 Using cached followup edit (${followupSession.queue.length} remaining, versionDiff=${versionDiff})`);
+          
+          // Clear suggestion cache to avoid stale suggestions being used after followup
+          this.clearSuggestionCache(docKey);
+          
+          // IMPORTANT: Clear ALL remaining followups after using one
+          // Because once this edit is accepted, the document structure changes
+          // and the remaining cached line numbers become invalid
+          this.logger.info(`[Cpp] 📦 Clearing remaining ${followupSession.queue.length} followups (line numbers will be stale after accept)`);
+          this.followups.delete(docKey);
+          
+          // Generate a request ID for this cached edit
+          const cachedRequestId = `cached-${Date.now()}-${this.requestSeed++}`;
+          
+          return {
+            ...nextEdit,
+            requestId: cachedRequestId,
+            // No nextEditActionId - we're clearing the cache, so no more cached followups
+            // A new request will be needed for subsequent edits
+          };
+        }
+      }
+    }
+    
+    // PRIORITY 2: Check suggestion cache - for superseded requests that completed
+    // This is checked AFTER followup cache to ensure next edits take priority
+    const cachedSuggestion = this.popCachedSuggestion(docKey, ctx.document.version);
     if (cachedSuggestion) {
       this.logger.info(`[Cpp] Using cached suggestion instead of making new request`);
       return cachedSuggestion;
@@ -318,7 +388,6 @@ export class CursorStateMachine implements vscode.Disposable {
 
     // Cancel previous request for same document and track current request
     // This follows Cursor's pattern of tracking this.db to ignore stale responses
-    const docKey = ctx.document.uri.toString();
     const prevRequestId = this.currentRequestByDocument.get(docKey);
     if (prevRequestId && prevRequestId !== requestId) {
       this.cancelStream(prevRequestId);
@@ -452,6 +521,7 @@ export class CursorStateMachine implements vscode.Disposable {
     } finally {
       this.unregisterStream(requestId);
       this.debounceManager?.removeRequest(requestId);
+      this.supersededRequests.delete(requestId);  // Clean up superseded tracking
       // Clean up current request tracking if this is still the current request
       if (this.currentRequestByDocument.get(docKey) === requestId) {
         this.currentRequestByDocument.delete(docKey);
@@ -459,15 +529,30 @@ export class CursorStateMachine implements vscode.Disposable {
     }
   }
 
-  async handleAccept(editor: vscode.TextEditor, requestId?: string, bindingId?: string): Promise<void> {
+  async handleAccept(
+    editor: vscode.TextEditor,
+    requestId?: string,
+    bindingId?: string,
+    acceptedLength?: number
+  ): Promise<void> {
     const resolvedRequestId = this.resolveRequestId(bindingId, requestId, editor.document.uri);
     if (!resolvedRequestId) {
       return;
     }
     this.lastAcceptedRequestId = resolvedRequestId;
     
+    // Mark as handled via command to avoid duplicate telemetry in handleCompletionEnd
+    this.acceptedViaCommand.add(resolvedRequestId);
+    
     // Record this acceptance for cursor prediction suppression
     this.heuristics.recordAcceptedSuggestion(editor.document.uri, editor.selection.active);
+    
+    // Record accept telemetry
+    this.telemetryService?.recordAcceptEvent(
+      editor.document,
+      resolvedRequestId,
+      acceptedLength ?? 0
+    );
     
     void this.cursorPrediction.handleSuggestionAccepted(editor);
     
@@ -705,14 +790,34 @@ export class CursorStateMachine implements vscode.Disposable {
     this.lastAcceptedRequestId = resolvedRequestId;
     
     // Proposed API: PartialAcceptInfo contains kind and acceptedLength
-    // kind: Word (1), Line (2), Suggest (3), or Unknown (0)
-    // This can be used for telemetry or adjusting followup behavior
+    // kind: Word (0), Line (1), Suggest (2), or Unknown (3)
     if (info) {
+      const kindStr = this.getPartialAcceptKindString(info.kind);
+      
+      // Record telemetry for partial accept
+      this.telemetryService?.recordPartialAcceptEvent(
+        editor.document,
+        resolvedRequestId,
+        info.acceptedLength,
+        kindStr
+      );
+      
       this.logger.info(
         `[Cpp] Partial accept: requestId=${resolvedRequestId}, ` +
-        `kind=${vscode.PartialAcceptTriggerKind[info.kind]}, ` +
-        `acceptedLength=${info.acceptedLength}`
+        `kind=${kindStr}, acceptedLength=${info.acceptedLength}`
       );
+    }
+  }
+
+  /**
+   * Convert VS Code PartialAcceptTriggerKind to string for telemetry
+   */
+  private getPartialAcceptKindString(kind: vscode.PartialAcceptTriggerKind): 'word' | 'line' | 'suggest' | 'unknown' {
+    switch (kind) {
+      case vscode.PartialAcceptTriggerKind.Word: return 'word';
+      case vscode.PartialAcceptTriggerKind.Line: return 'line';
+      case vscode.PartialAcceptTriggerKind.Suggest: return 'suggest';
+      default: return 'unknown';
     }
   }
 
@@ -721,16 +826,45 @@ export class CursorStateMachine implements vscode.Disposable {
     bindingId: string | undefined,
     reason: vscode.InlineCompletionEndOfLifeReason
   ): void {
-    if (reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Rejected || reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Ignored) {
-      // Record rejection for InlineEditTriggerer cooldown
-      this.recordRejection();
-      this.cleanupRequest(requestId, bindingId);
-    } else if (reason.kind === vscode.InlineCompletionEndOfLifeReasonKind.Accepted) {
-      // User accepted the completion - trigger a new completion with CursorPrediction source
-      // This matches Cursor's behavior of firing Ku.CursorPrediction after acceptance
-      this.lastAcceptedRequestId = requestId;
-      this.triggerCursorPrediction();
-      this.cleanupRequest(requestId, bindingId);
+    const editor = vscode.window.activeTextEditor;
+    
+    switch (reason.kind) {
+      case vscode.InlineCompletionEndOfLifeReasonKind.Accepted:
+        // User accepted the completion
+        // Note: handleAccept is called via item.command before this callback
+        // So we only do lightweight cleanup here, avoiding duplicate logic
+        this.lastAcceptedRequestId = requestId;
+        
+        // Record telemetry for acceptance (if not already done by handleAccept)
+        // The item.command callback handles the main accept logic including next edit triggering
+        if (editor && !this.acceptedViaCommand.has(requestId)) {
+          // Fallback: if somehow accepted without command, record it
+          this.telemetryService?.recordAcceptEvent(editor.document, requestId, 0);
+        }
+        this.acceptedViaCommand.delete(requestId);
+        this.cleanupRequest(requestId, bindingId);
+        break;
+        
+      case vscode.InlineCompletionEndOfLifeReasonKind.Rejected:
+        // User explicitly rejected (e.g., pressed Escape)
+        this.recordRejection();
+        if (editor) {
+          this.telemetryService?.recordRejectEvent(editor.document, requestId, 'explicit_reject');
+        }
+        this.cleanupRequest(requestId, bindingId);
+        break;
+        
+      case vscode.InlineCompletionEndOfLifeReasonKind.Ignored:
+        // Completion was ignored (e.g., new request, typing disagreed)
+        this.recordRejection();
+        if (editor) {
+          // Distinguish between different ignore reasons for telemetry
+          const ignoreReason = (reason as any).userTypingDisagreed ? 'typing_disagreed' : 
+                               (reason as any).supersededBy ? 'superseded' : 'ignored';
+          this.telemetryService?.recordRejectEvent(editor.document, requestId, ignoreReason);
+        }
+        this.cleanupRequest(requestId, bindingId);
+        break;
     }
   }
 
@@ -841,6 +975,9 @@ export class CursorStateMachine implements vscode.Disposable {
     };
 
     let chunkCount = 0;
+    let hasNextEdit = false;  // Flag to indicate there are more edits in the stream
+    let nextEditActionId: string | undefined;  // ID for triggering next edit
+    
     for await (const chunk of stream as AsyncIterable<any>) {
       chunkCount++;
       
@@ -849,19 +986,29 @@ export class CursorStateMachine implements vscode.Disposable {
       const chunkSummary = chunk.rangeToReplace 
         ? `L${chunk.rangeToReplace.startLineNumber}-${chunk.rangeToReplace.endLineNumberInclusive}`
         : chunk.text 
-        ? `"${chunk.text.slice(0, 50).replace(/\n/g, '\\n')}${chunk.text.length > 50 ? '...' : ''}"` 
+        ? `"${chunk.text.slice(0, 50).replace(/\n/g, '\\n')}${chunk.text.length > 50 ? '...' : ''}"`
         : '';
       this.logger.info(`[Cpp] Chunk #${chunkCount} [${chunkType}]: ${chunkSummary}`);
       
-      if (ctx.token.isCancellationRequested) {
+      // Only abort on hard user cancellation (e.g., Escape key)
+      // Don't abort if just superseded by new request - let it complete and cache
+      if (ctx.token.isCancellationRequested && !this.supersededRequests.has(requestId)) {
+        this.logger.info(`[Cpp] User cancelled request ${requestId.slice(0, 8)}, aborting`);
         abortController.abort();
         return [];
       }
       
-      // Handle beginEdit: signals start of a new edit, reset state
+      // Handle beginEdit: signals start of a new edit
+      // Continue reading the entire stream but track that there are more edits
       if (chunk.beginEdit) {
         this.logger.info(`[Cpp] beginEdit received, current edits=${edits.length}`);
-        // Don't flush here - state should already be reset from previous doneEdit
+        if (edits.length > 0) {
+          // We already have one edit, mark that there's a next edit
+          // But DON'T break - continue reading to cache all edits
+          hasNextEdit = true;
+          nextEditActionId = `${requestId}-next`;
+          this.logger.info(`[Cpp] 🔄 NEXT_EDIT detected! Continuing to read stream to cache all edits`);
+        }
         continue;
       }
       
@@ -905,7 +1052,7 @@ export class CursorStateMachine implements vscode.Disposable {
           displayLocation = {
             range: lineRange,
             label: 'Next Edit Location',
-            kind: vscode.InlineCompletionDisplayLocationKind.Code,
+            kind: vscode.InlineCompletionDisplayLocationKind?.Code ?? 0,  // 0 = Code kind
           };
           this.logger.info(`[Cpp] ✅ CursorPrediction displayLocation created (SAME_FILE, Code kind): line ${line + 1}`);
         } else if (!isSameFile) {
@@ -913,7 +1060,7 @@ export class CursorStateMachine implements vscode.Disposable {
           displayLocation = {
             range: new vscode.Range(ctx.position, ctx.position),
             label: `Go to ${chunk.cursorPredictionTarget.relativePath}:${line + 1}`,
-            kind: vscode.InlineCompletionDisplayLocationKind.Label,
+            kind: vscode.InlineCompletionDisplayLocationKind?.Label ?? 1,  // 1 = Label kind
           };
           this.logger.info(`[Cpp] ✅ CursorPrediction displayLocation created (CROSS_FILE, Label kind): ${chunk.cursorPredictionTarget.relativePath}:${line + 1}`);
         } else {
@@ -931,13 +1078,16 @@ export class CursorStateMachine implements vscode.Disposable {
       if (chunk.doneEdit) {
         flushEdit();
       }
+      
+      // Log progress for debugging
+      this.logger.info(`[Cpp] ✓ Chunk #${chunkCount} processed, continuing loop`);
     }
     // Final flush for any remaining edit
     if (range) {
       flushEdit();
     }
     
-    this.logger.info(`[Cpp] Stream finished: ${chunkCount} chunks processed, ${edits.length} edits collected`);
+    this.logger.info(`[Cpp] Stream finished: ${chunkCount} chunks processed, ${edits.length} edits collected, hasNextEdit=${hasNextEdit}`);
     
     // Handle case where there's no edit but there is a cursor prediction (jump hint)
     if (edits.length === 0) {
@@ -960,139 +1110,94 @@ export class CursorStateMachine implements vscode.Disposable {
       return [];
     }
     
-    // For multidiff: combine all edits into a single suggestion
-    // Sort edits by start line number
-    const sortedEdits = [...edits].sort((a, b) => a.range.startLineNumber - b.range.startLineNumber);
+    // SIMPLIFIED: Use only the first edit directly (like vscode-copilot-chat approach)
+    // No more combineEdits - if there are more edits, they will be shown via nextAction
+    const firstEdit = edits[0];
+    const suggestionText = firstEdit.text;
     
-    // Calculate the combined range (min start to max end)
-    const minStartLine = Math.min(...sortedEdits.map(e => e.range.startLineNumber));
-    const maxEndLine = Math.max(...sortedEdits.map(e => e.range.endLineNumberInclusive));
+    // Convert 1-indexed server range to 0-indexed VS Code range
+    // VS Code Range API automatically handles out-of-bounds values
+    const startLine = Math.max(0, firstEdit.range.startLineNumber - 1);
+    const endLine = Math.max(startLine, firstEdit.range.endLineNumberInclusive - 1);
     
-    // Build combined text by applying edits to original document content
-    const combinedText = this.combineEdits(ctx.document, sortedEdits, minStartLine, maxEndLine);
+    // Use Number.MAX_SAFE_INTEGER for column - VS Code will auto-clamp to line end
+    const vsRange = new vscode.Range(startLine, 0, endLine, Number.MAX_SAFE_INTEGER);
+    const originalText = ctx.document.getText(vsRange);
     
-    const combinedRange = {
-      startLineNumber: minStartLine,
-      endLineNumberInclusive: maxEndLine,
-    } as LineRange;
-    
-    const fullVsRange = this.toVsRange(ctx.document, combinedRange);
-    const originalText = ctx.document.getText(fullVsRange);
-    
-    // For single-line edits, compute minimal diff from cursor position
-    // VS Code InlineCompletion works best when range starts at/after cursor
-    let vsRange = fullVsRange;
-    let suggestionText = combinedText;
-    
-    if (fullVsRange.isSingleLine && ctx.position.line === fullVsRange.start.line) {
-      const cursorCol = ctx.position.character;
-      
-      // Find common prefix length (up to cursor position)
-      let commonPrefixLen = 0;
-      const maxPrefix = Math.min(cursorCol, originalText.length, combinedText.length);
-      while (commonPrefixLen < maxPrefix && originalText[commonPrefixLen] === combinedText[commonPrefixLen]) {
-        commonPrefixLen++;
-      }
-      
-      // Find common suffix length
-      let commonSuffixLen = 0;
-      const maxSuffix = Math.min(originalText.length - commonPrefixLen, combinedText.length - commonPrefixLen);
-      while (commonSuffixLen < maxSuffix && 
-             originalText[originalText.length - 1 - commonSuffixLen] === combinedText[combinedText.length - 1 - commonSuffixLen]) {
-        commonSuffixLen++;
-      }
-      
-      // Extract the minimal change
-      const replaceStart = commonPrefixLen;
-      const replaceEnd = originalText.length - commonSuffixLen;
-      const insertStart = commonPrefixLen;
-      const insertEnd = combinedText.length - commonSuffixLen;
-      
-      this.logger.info(`[Cpp] Minimal diff: prefix=${commonPrefixLen}, suffix=${commonSuffixLen}, cursor=${cursorCol}`);
-      this.logger.info(`[Cpp]   Original[${replaceStart}:${replaceEnd}]="${originalText.slice(replaceStart, replaceEnd)}"`);
-      this.logger.info(`[Cpp]   Insert[${insertStart}:${insertEnd}]="${combinedText.slice(insertStart, insertEnd)}"`);
-      
-      // If the change starts at or after cursor, use minimal range
-      // Otherwise, fall back to replacing from cursor to end
-      if (replaceStart >= cursorCol - 1) {
-        // Minimal change is at/after cursor - use it
-        vsRange = new vscode.Range(
-          fullVsRange.start.line, replaceStart,
-          fullVsRange.start.line, replaceEnd
-        );
-        suggestionText = combinedText.slice(insertStart, insertEnd);
-      } else {
-        // Change starts before cursor - replace from cursor to end
-        vsRange = new vscode.Range(
-          fullVsRange.start.line, cursorCol,
-          fullVsRange.end.line, fullVsRange.end.character
-        );
-        suggestionText = combinedText.slice(cursorCol);
-      }
-      
-      this.logger.info(`[Cpp] Adjusted range: (${vsRange.start.line},${vsRange.start.character})-(${vsRange.end.line},${vsRange.end.character}), text="${suggestionText}"`);
-    }
+    this.logger.info(`[Cpp] Using edit directly: server L${firstEdit.range.startLineNumber}-${firstEdit.range.endLineNumberInclusive} -> vscode L${startLine}-${endLine}, text="${suggestionText.slice(0, 50)}${suggestionText.length > 50 ? '...' : ''}"`);
     
     // Determine if this is an inline edit or a simple inline completion
     // Use inline completion (not edit) when:
     // 1. Single line edit on the cursor's line
     // 2. The original text is a "subword" of the new text (i.e., we're only adding characters)
     // This matches VS Code Copilot's isInlineSuggestion logic
-    const isMultiLine = fullVsRange.start.line !== fullVsRange.end.line;
-    const isSameLine = fullVsRange.start.line === ctx.position.line;
-    const isInlineSuggestion = !isMultiLine && isSameLine && this.isSubword(originalText, combinedText);
-    const isInlineEdit = !isInlineSuggestion && originalText !== combinedText;
+    const isMultiLine = vsRange.start.line !== vsRange.end.line;
+    const isSameLine = vsRange.start.line === ctx.position.line;
+    const isInlineSuggestion = !isMultiLine && isSameLine && this.isSubword(originalText, suggestionText);
+    const isInlineEdit = !isInlineSuggestion && originalText !== suggestionText;
     
     // CRITICAL: showRange must include the cursor position for VS Code to show the completion
     // Extend the range to include cursor line if needed
     let showRange: vscode.Range | undefined;
     if (isInlineEdit) {
       const cursorLine = ctx.position.line;
-      const startLine = Math.min(fullVsRange.start.line, cursorLine);
-      const endLine = Math.max(fullVsRange.end.line, cursorLine);
+      const startLine = Math.min(vsRange.start.line, cursorLine);
+      const endLine = Math.max(vsRange.end.line, cursorLine);
       
       // If cursor is on a different line, extend showRange to include it
-      if (startLine !== fullVsRange.start.line || endLine !== fullVsRange.end.line) {
-        const startChar = startLine === fullVsRange.start.line ? fullVsRange.start.character : 0;
-        const endChar = endLine === fullVsRange.end.line 
-          ? fullVsRange.end.character 
+      if (startLine !== vsRange.start.line || endLine !== vsRange.end.line) {
+        const startChar = startLine === vsRange.start.line ? vsRange.start.character : 0;
+        const endChar = endLine === vsRange.end.line 
+          ? vsRange.end.character 
           : ctx.document.lineAt(endLine).range.end.character;
         showRange = new vscode.Range(startLine, startChar, endLine, endChar);
         this.logger.info(`[Cpp] Extended showRange to include cursor: (${startLine},${startChar})-(${endLine},${endChar})`);
       } else {
-        showRange = fullVsRange;
+        showRange = vsRange;
       }
     }
     
-    this.logger.info(`[Cpp] isInlineSuggestion=${isInlineSuggestion}, isInlineEdit=${isInlineEdit}, original="${originalText}", combined="${combinedText}"`);
+    this.logger.info(`[Cpp] isInlineSuggestion=${isInlineSuggestion}, isInlineEdit=${isInlineEdit}, original="${originalText}", text="${suggestionText}"`);
+    
+    // If there's a next edit, add displayLocation to show "Next edit available" label
+    let finalDisplayLocation = displayLocation;
+    if (hasNextEdit && !displayLocation) {
+      finalDisplayLocation = {
+        range: new vscode.Range(ctx.position, ctx.position),
+        label: 'Next edit available (Tab to apply, then Tab again)',
+        kind: vscode.InlineCompletionDisplayLocationKind?.Label ?? 1,  // 1 = Label kind
+      };
+      this.logger.info(`[Cpp] 🔄 Added nextEdit displayLocation hint`);
+    }
     
     const suggestion: RawSuggestion = {
       text: suggestionText,
       range: vsRange,
-      bindingId: sortedEdits[0]?.bindingId,
-      lineRange: combinedRange,
-      displayLocation,
+      bindingId: firstEdit.bindingId,
+      lineRange: firstEdit.range as LineRange,
+      displayLocation: finalDisplayLocation,
       isInlineEdit,
       showRange,
       cursorPredictionTarget,
+      nextEditActionId,  // Pass the nextAction ID for triggering next edit on accept
     };
     
-    this.logger.info(`[Cpp] Combined ${edits.length} edits into suggestion: lines ${minStartLine}-${maxEndLine}, ${suggestionText.length} chars`);
+    this.logger.info(`[Cpp] Created suggestion from first edit: lines ${firstEdit.range.startLineNumber}-${firstEdit.range.endLineNumberInclusive}, ${suggestionText.length} chars, hasNextEdit=${hasNextEdit}`);
     
     // Log cursor prediction info if present
     if (cursorPredictionTarget) {
       this.logger.info(`[Cpp] 📍 Suggestion includes CursorPrediction: ${cursorPredictionTarget.relativePath}:${cursorPredictionTarget.lineNumberOneIndexed}`);
     }
-    if (displayLocation) {
-      this.logger.info(`[Cpp] 📍 Suggestion includes displayLocation: kind=${displayLocation.kind}, label="${displayLocation.label}"`);
+    if (finalDisplayLocation) {
+      this.logger.info(`[Cpp] 📍 Suggestion includes displayLocation: kind=${finalDisplayLocation.kind}, label="${finalDisplayLocation.label}"`);
     }
     
     // Apply isValidCppCase heuristics (like Cursor's validation)
     const validation = this.heuristics.isValidCppCase(
       ctx.document,
-      minStartLine,
-      maxEndLine,
-      combinedText
+      firstEdit.range.startLineNumber,
+      firstEdit.range.endLineNumberInclusive,
+      suggestionText
     );
     
     if (!validation.valid) {
@@ -1117,20 +1222,61 @@ export class CursorStateMachine implements vscode.Disposable {
     }
     
     // Apply cursor prediction suppression if present
+    // Note: We don't return early here - we need to continue to cache followup edits
+    let finalSuggestion = suggestion;
     if (cursorPredictionTarget) {
       const suppressResult = this.shouldSuppressCursorPrediction(cursorPredictionTarget, ctx.position);
       if (suppressResult) {
         this.logger.info(`[Cpp] 📍 Cursor prediction suppressed, keeping only code edit`);
-        // Return suggestion without cursor prediction
-        return [{
+        // Modify suggestion to remove cursor prediction, but don't return yet
+        finalSuggestion = {
           ...suggestion,
           cursorPredictionTarget: undefined,
           displayLocation: undefined,
-        }];
+        };
       }
     }
     
-    return [suggestion];
+    // If there are more edits, cache them in followups for the next request
+    // This ensures that even if this request is cancelled, the next request can use the cached edits
+    if (edits.length > 1) {
+      const followupEdits: RawSuggestion[] = [];
+      for (let i = 1; i < edits.length; i++) {
+        const edit = edits[i];
+        // Convert 1-indexed to 0-indexed, VS Code auto-clamps out-of-bounds
+        const editStartLine = Math.max(0, edit.range.startLineNumber - 1);
+        const editEndLine = Math.max(editStartLine, edit.range.endLineNumberInclusive - 1);
+        const editVsRange = new vscode.Range(editStartLine, 0, editEndLine, Number.MAX_SAFE_INTEGER);
+        
+        followupEdits.push({
+          text: edit.text,
+          range: editVsRange,
+          bindingId: edit.bindingId,
+          lineRange: edit.range as LineRange,
+          isInlineEdit: true,
+        });
+      }
+      
+      // Store in followups cache - keyed by document URI so it persists across requests
+      const docKey = ctx.document.uri.toString();
+      this.followups.set(docKey, {
+        document: ctx.document.uri,
+        queue: followupEdits,
+        documentVersion: ctx.document.version,  // Track version to detect stale cache
+      });
+      
+      // Also set up nextAction cache
+      if (nextEditActionId) {
+        this.nextActionCache.set(nextEditActionId, {
+          type: { action: 'nextEdit' },
+          requestId: requestId,
+        });
+      }
+      
+      this.logger.info(`[Cpp] 📦 Cached ${followupEdits.length} followup edits for document ${docKey}`);
+    }
+    
+    return [finalSuggestion];
   }
   
   /**
@@ -1392,29 +1538,37 @@ export class CursorStateMachine implements vscode.Disposable {
     this.activeStreams.set(requestId, controller);
     if (this.activeStreams.size > MAX_CONCURRENT_STREAMS) {
       const [oldest] = this.activeStreams.keys();
-      const abort = this.activeStreams.get(oldest);
-      if (abort) {
-        abort.abort();
-      }
-      this.activeStreams.delete(oldest);
-      this.logger.warn(`Too many concurrent streams, aborted ${oldest}`);
+      // Use soft cancel instead of hard abort - let it complete and cache results
+      this.supersededRequests.add(oldest);
+      this.logger.info(`[Cpp] Too many streams (>${MAX_CONCURRENT_STREAMS}), marking ${oldest.slice(0, 8)} as superseded`);
+      // Note: Don't abort or delete - let it finish processing naturally
     }
   }
 
   private unregisterStream(requestId: string): void {
-    const controller = this.activeStreams.get(requestId);
-    if (controller) {
-      controller.abort();
-      this.activeStreams.delete(requestId);
-    }
+    // Just remove from tracking - don't abort since stream completed naturally
+    this.activeStreams.delete(requestId);
   }
 
   private cancelStream(requestId: string): void {
     const controller = this.activeStreams.get(requestId);
     if (controller) {
+      // Mark as superseded instead of immediately aborting
+      // This allows the stream to complete processing and cache results
+      this.supersededRequests.add(requestId);
+      this.logger.info(`[Cpp] Marked stream ${requestId.slice(0, 8)} as superseded (will cache result)`);
+      // Note: We don't abort or cancelCpp here - let the stream complete
+    }
+  }
+  
+  /** Hard cancel a stream (used for user-initiated cancellation like Escape) */
+  private hardCancelStream(requestId: string): void {
+    const controller = this.activeStreams.get(requestId);
+    if (controller) {
       controller.abort();
       this.rpc.cancelCpp(requestId);
-      this.logger.info(`[Cpp] Cancelled stream ${requestId.slice(0, 8)}`);
+      this.supersededRequests.delete(requestId);
+      this.logger.info(`[Cpp] Hard cancelled stream ${requestId.slice(0, 8)}`);
     }
   }
 
@@ -1448,22 +1602,18 @@ export class CursorStateMachine implements vscode.Disposable {
    * Convert server's 1-indexed LineRange to VS Code's 0-indexed Range.
    * Server: startLineNumber=89 means line 89 (1-indexed)
    * VS Code: line 88 (0-indexed)
+   * VS Code Range API automatically clamps out-of-bounds values.
    */
-  private toVsRange(document: vscode.TextDocument, lineRange: LineRange): vscode.Range {
-    // Convert 1-indexed to 0-indexed
+  private toVsRange(lineRange: LineRange): vscode.Range {
     const startLine = Math.max(0, lineRange.startLineNumber - 1);
-    const endLine = Math.min(document.lineCount - 1, lineRange.endLineNumberInclusive - 1);
-    const startChar = 0;
-    const endChar = document.lineAt(endLine).range.end.character;
-    
-    this.logger.info(`[Cpp] toVsRange: server L${lineRange.startLineNumber}-${lineRange.endLineNumberInclusive} (1-indexed) -> vscode L${startLine}-${endLine}:${endChar} (0-indexed)`);
-    
-    return new vscode.Range(new vscode.Position(startLine, startChar), new vscode.Position(endLine, endChar));
+    const endLine = Math.max(startLine, lineRange.endLineNumberInclusive - 1);
+    // Use MAX_SAFE_INTEGER for column - VS Code auto-clamps to line end
+    return new vscode.Range(startLine, 0, endLine, Number.MAX_SAFE_INTEGER);
   }
 
   private getApplicableRange(document: vscode.TextDocument, suggestion: RawSuggestion): vscode.Range {
     if (suggestion.lineRange) {
-      return this.toVsRange(document, suggestion.lineRange);
+      return this.toVsRange(suggestion.lineRange);
     }
     return suggestion.range;
   }

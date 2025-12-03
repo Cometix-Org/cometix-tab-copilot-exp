@@ -179,13 +179,15 @@ export class InlineEditTriggerer implements vscode.Disposable {
     // Typing trigger: if active editor matches and selection is a caret, debounce and trigger
     const active = vscode.window.activeTextEditor;
     if (active?.document === e.document && active.selection?.isEmpty) {
+      // Capture cursor position immediately before timeout is scheduled
+      const cursorPosition = active.selection.start;
       const current = this.documentChanges.get(docKey)!;
       if (current.debounceTimeout) {
         clearTimeout(current.debounceTimeout);
       }
       current.debounceTimeout = setTimeout(() => {
         this.logger.info(`[InlineEditTriggerer] Triggering on typing`);
-        this.triggerSuggestion(e.document, active.selection.start, TriggerSource.Typing);
+        this.triggerSuggestion(e.document, cursorPosition, TriggerSource.Typing);
       }, this.config.typingDebounceMs);
     }
   }

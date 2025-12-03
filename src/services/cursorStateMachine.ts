@@ -1034,7 +1034,7 @@ export class CursorStateMachine implements vscode.Disposable {
     const targetRange = this.getApplicableRange(editor.document, next);
     await editor.edit((builder) => builder.replace(targetRange, next.text));
     if (!session.queue.length) {
-      this.followups.delete(targetRequestId);
+      this.followups.delete(docKey);
       if (bindingId) {
         this.bindingCache.delete(bindingId);
       }

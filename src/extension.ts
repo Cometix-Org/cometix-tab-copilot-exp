@@ -141,6 +141,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Get telemetry service from container for UI integration
 	const telemetryService = container.resolve<TelemetryService>('telemetryService');
+	const debounceManager = container.resolve<DebounceManager>('debounceManager');
 
 	// Wire up StatusBar with services
 	statusBar.setTelemetryService(telemetryService);
@@ -236,6 +237,18 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Fetch server config on activation
 	fetchAndCacheServerConfig(rpcClient, serverConfigService, logger);
+	// Apply debounce durations when server config updates
+	serverConfigService.onConfigUpdated((cfg) => {
+		const clientMs = cfg.clientDebounceMs;
+		const globalMs = cfg.globalDebounceMs;
+		if (clientMs !== undefined || globalMs !== undefined) {
+			debounceManager.setDebounceDurations({
+				clientDebounceDuration: clientMs,
+				totalDebounceDuration: globalMs,
+			});
+			logger.info(`[Extension] Updated debounce durations from server config (client=${clientMs ?? '-'}ms, global=${globalMs ?? '-'}ms)`);
+		}
+	});
 
 	// Check and prompt for proposed API on startup (non-blocking)
 	// Extension ID format: publisher.name

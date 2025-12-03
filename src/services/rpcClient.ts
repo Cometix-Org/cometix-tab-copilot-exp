@@ -6,6 +6,14 @@ import {
   StreamCppRequest,
   StreamNextCursorPredictionRequest,
   StreamNextCursorPredictionResponse,
+  CursorPredictionConfigRequest,
+  CursorPredictionConfigResponse,
+  RecordCppFateRequest,
+  RecordCppFateResponse,
+  CppAppendRequest,
+  CppAppendResponse,
+  EditHistoryAppendChangesRequest,
+  EditHistoryAppendChangesResponse,
   FSUploadFileRequest,
   FSUploadFileResponse,
   FSSyncFileRequest,
@@ -106,6 +114,32 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
     const response = await this.client.getCppConfig();
     this.logger.info(`[rpc] CppConfig response: ${this.stringifyPayload(response)}`);
     return response;
+  }
+
+  async cursorPredictionConfig(_request?: CursorPredictionConfigRequest): Promise<CursorPredictionConfigResponse> {
+    this.logger.info('[rpc] CursorPredictionConfig request');
+    const response = await (this.client as any).cursorPredictionConfig();
+    this.logger.info(`[rpc] CursorPredictionConfig response: ${this.stringifyPayload(response)}`);
+    return response as CursorPredictionConfigResponse;
+  }
+
+  async recordCppFate(request: RecordCppFateRequest): Promise<RecordCppFateResponse> {
+    this.logger.info(`[rpc] RecordCppFate request: ${this.stringifyPayload(request)}`);
+    const response = await (this.client as any).recordCppFate(request);
+    this.logger.info(`[rpc] RecordCppFate response: ${this.stringifyPayload(response)}`);
+    return response as RecordCppFateResponse;
+  }
+
+  async cppAppend(request: CppAppendRequest): Promise<CppAppendResponse> {
+    this.logger.info(`[rpc] CppAppend request`);
+    const response = await (this.client as any).cppAppend(request);
+    return response as CppAppendResponse;
+  }
+
+  async cppEditHistoryAppend(request: EditHistoryAppendChangesRequest): Promise<EditHistoryAppendChangesResponse> {
+    this.logger.info(`[rpc] CppEditHistoryAppend request`);
+    const response = await (this.client as any).cppEditHistoryAppend(request);
+    return response as EditHistoryAppendChangesResponse;
   }
 
   dispose(): void {

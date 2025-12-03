@@ -39,6 +39,8 @@ export interface CppHeuristicsConfig {
   enabledHeuristics: CppHeuristicType[];
   /** Min line distance for cursor prediction suppression */
   cursorPredictionMinLineDistance: number;
+  /** Enabled cursor prediction heuristics from CursorPredictionConfigResponse */
+  cursorPredictionHeuristics: CursorPredictionHeuristic[];
 }
 
 const DEFAULT_CONFIG: CppHeuristicsConfig = {
@@ -49,6 +51,9 @@ const DEFAULT_CONFIG: CppHeuristicsConfig = {
     CppHeuristicType.OUTPUT_EXTENDS_BEYOND_RANGE_AND_IS_REPEATED,
   ],
   cursorPredictionMinLineDistance: 5,
+  cursorPredictionHeuristics: [
+    CursorPredictionHeuristic.DISABLE_IN_LAST_CPP_SUGGESTION,
+  ],
 };
 
 /**
@@ -58,6 +63,17 @@ export interface AcceptedSuggestionInfo {
   readonly uri: vscode.Uri;
   readonly position: vscode.Position;
   readonly timestamp: number;
+  /** The range of the accepted suggestion (for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION) */
+  readonly range?: vscode.Range;
+}
+
+/**
+ * Cursor Prediction Heuristics from CursorPredictionConfigResponse
+ * These can be enabled/disabled via server config
+ */
+export enum CursorPredictionHeuristic {
+  /** Disable prediction when cursor is in the last CPP suggestion range */
+  DISABLE_IN_LAST_CPP_SUGGESTION = 'disable_in_last_cpp_suggestion',
 }
 
 /**
@@ -73,6 +89,9 @@ export class CppHeuristicsService implements vscode.Disposable {
   
   /** Whether the last cursor movement was caused by a cursor prediction */
   private lastCursorMoveWasPrediction = false;
+  
+  /** Last CPP suggestion range for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION */
+  private lastCppSuggestionRange?: { uri: vscode.Uri; range: vscode.Range; timestamp: number };
 
   constructor(
     private readonly logger: ILogger,
@@ -264,19 +283,63 @@ export class CppHeuristicsService implements vscode.Disposable {
   /**
    * Record an accepted suggestion for cursor prediction suppression
    */
-  recordAcceptedSuggestion(uri: vscode.Uri, position: vscode.Position): void {
+  recordAcceptedSuggestion(uri: vscode.Uri, position: vscode.Position, range?: vscode.Range): void {
     this.pruneExpiredSuggestions();
+    
+    const timestamp = Date.now();
     
     this.recentlyAcceptedSuggestions.push({
       uri,
       position,
-      timestamp: Date.now(),
+      timestamp,
+      range,
     });
     
     // Keep only recent suggestions
     while (this.recentlyAcceptedSuggestions.length > this.MAX_RECENT_SUGGESTIONS) {
       this.recentlyAcceptedSuggestions.shift();
     }
+    
+    // Also update last CPP suggestion range for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION
+    if (range) {
+      this.lastCppSuggestionRange = { uri, range, timestamp };
+    }
+  }
+
+  /**
+   * Record the last CPP suggestion range (for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION)
+   */
+  recordLastCppSuggestionRange(uri: vscode.Uri, range: vscode.Range): void {
+    this.lastCppSuggestionRange = { uri, range, timestamp: Date.now() };
+  }
+
+  /**
+   * Check if prediction location is within the last CPP suggestion range
+   * Implements HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION from CursorPredictionConfigResponse
+   */
+  isPredictionInLastCppSuggestionRange(
+    predictionLineOneIndexed: number,
+    predictionRelativePath: string
+  ): boolean {
+    if (!this.lastCppSuggestionRange) {
+      return false;
+    }
+    
+    // Check if suggestion is still recent (within expiry time)
+    if (Date.now() - this.lastCppSuggestionRange.timestamp > this.SUGGESTION_EXPIRY_MS) {
+      this.lastCppSuggestionRange = undefined;
+      return false;
+    }
+    
+    // Check if the file path matches
+    if (!this.lastCppSuggestionRange.uri.path.includes(predictionRelativePath)) {
+      return false;
+    }
+    
+    // Check if prediction line is within the suggestion range (convert to 0-indexed)
+    const predictionLine = predictionLineOneIndexed - 1;
+    const range = this.lastCppSuggestionRange.range;
+    return predictionLine >= range.start.line && predictionLine <= range.end.line;
   }
 
   /**
@@ -309,18 +372,35 @@ export class CppHeuristicsService implements vscode.Disposable {
       return { suppress: true, reason: 'lastMoveWasPrediction' };
     }
     
-    // 2. Check if too close to recently accepted
+    // 2. Check HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION (from CursorPredictionConfigResponse)
+    // This heuristic disables prediction when the cursor is in the last CPP suggestion range
+    if (
+      this.config.cursorPredictionHeuristics.includes(CursorPredictionHeuristic.DISABLE_IN_LAST_CPP_SUGGESTION) &&
+      this.isPredictionInLastCppSuggestionRange(predictionLineOneIndexed, predictionRelativePath)
+    ) {
+      this.logger.info('[CppHeuristics] Suppressing cursor prediction: prediction is in last CPP suggestion range');
+      return { suppress: true, reason: 'inLastCppSuggestionRange' };
+    }
+    
+    // 3. Check if too close to recently accepted
     if (this.isCursorPredictionTooCloseToRecentlyAccepted(predictionLineOneIndexed, predictionRelativePath)) {
       this.logger.info('[CppHeuristics] Suppressing cursor prediction: too close to recently accepted suggestion');
       return { suppress: true, reason: 'tooCloseToAccepted' };
     }
     
-    // 3. Check if too close to cursor
+    // 4. Check if too close to cursor
     if (this.isCursorPredictionTooCloseToCursor(predictionLineOneIndexed, cursorPosition)) {
       this.logger.info('[CppHeuristics] Suppressing cursor prediction: too close to cursor');
       return { suppress: true, reason: 'tooCloseToCursor' };
     }
     
     return { suppress: false };
+  }
+
+  /**
+   * Clear the last CPP suggestion range (e.g., on document switch)
+   */
+  clearLastCppSuggestionRange(): void {
+    this.lastCppSuggestionRange = undefined;
   }
 }

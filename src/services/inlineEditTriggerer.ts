@@ -18,6 +18,8 @@ export interface InlineEditTriggererConfig {
   documentSwitchTriggerAfterSeconds: number;
   /** Debounce time for rapid selection changes (ms) */
   selectionChangeDebounceMs: number;
+  /** Debounce time for typing-triggered suggestions (ms) */
+  typingDebounceMs: number;
 }
 
 const DEFAULT_CONFIG: InlineEditTriggererConfig = {
@@ -27,6 +29,7 @@ const DEFAULT_CONFIG: InlineEditTriggererConfig = {
   triggerOnDocumentSwitch: true,
   documentSwitchTriggerAfterSeconds: 10,
   selectionChangeDebounceMs: 150,
+  typingDebounceMs: 75,
 };
 
 /**
@@ -129,8 +132,21 @@ export class InlineEditTriggerer implements vscode.Disposable {
   }
 
   private shouldIgnoreDocument(doc: vscode.TextDocument): boolean {
-    // Ignore output pane and other non-file documents
-    return doc.uri.scheme === 'output' || doc.uri.scheme === 'debug';
+    // Ignore output pane and other non-file documents (best-effort for diff/peek)
+    const s = doc.uri.scheme;
+    if (s === 'file' || s === 'untitled') {
+      return false;
+    }
+    const ignoredSchemes = new Set([
+      'output',
+      'debug',
+      'git',
+      'vscode-userdata',
+      'vscode-notebook-cell',
+      'vscode-bulk-edit',
+      'walkThroughSnippet',
+    ]);
+    return ignoredSchemes.has(s);
   }
 
   private onDocumentChange(e: vscode.TextDocumentChangeEvent): void {
@@ -159,6 +175,19 @@ export class InlineEditTriggerer implements vscode.Disposable {
       document: e.document,
       consecutiveSelectionChanges: 0,
     });
+
+    // Typing trigger: if active editor matches and selection is a caret, debounce and trigger
+    const active = vscode.window.activeTextEditor;
+    if (active?.document === e.document && active.selection?.isEmpty) {
+      const current = this.documentChanges.get(docKey)!;
+      if (current.debounceTimeout) {
+        clearTimeout(current.debounceTimeout);
+      }
+      current.debounceTimeout = setTimeout(() => {
+        this.logger.info(`[InlineEditTriggerer] Triggering on typing`);
+        this.triggerSuggestion(e.document, active.selection.start, TriggerSource.Typing);
+      }, this.config.typingDebounceMs);
+    }
   }
 
   private onSelectionChange(e: vscode.TextEditorSelectionChangeEvent): void {
@@ -185,8 +214,8 @@ export class InlineEditTriggerer implements vscode.Disposable {
 
     // Check rejection cooldown
     if (now - this.lastRejectionTime < this.config.rejectionCooldownMs) {
-      // User is moving cursor within cooldown after rejection, clear tracking
-      this.documentChanges.delete(docKey);
+      // User is moving cursor within cooldown after rejection; skip triggering but keep edit tracking
+      this.logger.info(`[InlineEditTriggerer] LineChange skipped: in rejection cooldown (${now - this.lastRejectionTime}ms < ${this.config.rejectionCooldownMs}ms)`);
       return;
     }
 

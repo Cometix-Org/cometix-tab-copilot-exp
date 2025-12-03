@@ -5,6 +5,14 @@ import {
   FSUploadFileResponse,
   FSSyncFileRequest,
   FSSyncFileResponse,
+  CursorPredictionConfigResponse,
+  CursorPredictionConfigRequest,
+  RecordCppFateRequest,
+  RecordCppFateResponse,
+  CppAppendRequest,
+  CppAppendResponse,
+  EditHistoryAppendChangesRequest,
+  EditHistoryAppendChangesResponse,
   RefreshTabContextRequest,
   RefreshTabContextResponse,
   StreamCppRequest,
@@ -30,6 +38,11 @@ export interface IConfigService extends vscode.Disposable {
 export interface IDocumentTracker extends vscode.Disposable {
   getHistory(uri: vscode.Uri): string[];
   clear(uri: vscode.Uri): void;
+  /**
+   * Get recent diff history entries with timestamps for a document.
+   * Timestamps are in milliseconds since epoch.
+   */
+  getHistoryWithTimestamps(uri: vscode.Uri): Array<{ timestamp: number; change: string }>;
 }
 
 export interface IRpcClient extends vscode.Disposable {
@@ -55,6 +68,10 @@ export interface IRpcClient extends vscode.Disposable {
   refreshTabContext(request: RefreshTabContextRequest): Promise<RefreshTabContextResponse>;
   uploadFile(request: FSUploadFileRequest): Promise<FSUploadFileResponse>;
   syncFile(request: FSSyncFileRequest): Promise<FSSyncFileResponse>;
+  cursorPredictionConfig(request?: CursorPredictionConfigRequest): Promise<CursorPredictionConfigResponse>;
+  recordCppFate(request: RecordCppFateRequest): Promise<RecordCppFateResponse>;
+  cppAppend(request: CppAppendRequest): Promise<CppAppendResponse>;
+  cppEditHistoryAppend(request: EditHistoryAppendChangesRequest): Promise<EditHistoryAppendChangesResponse>;
 }
 
 export interface IFileSyncCoordinator extends vscode.Disposable {

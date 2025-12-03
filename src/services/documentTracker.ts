@@ -19,6 +19,10 @@ export class DocumentTracker implements vscode.Disposable, IDocumentTracker {
   getHistory(uri: vscode.Uri): string[] {
     return (this.history.get(uri.toString()) ?? []).map((entry) => entry.change);
   }
+  
+  getHistoryWithTimestamps(uri: vscode.Uri): Array<{ timestamp: number; change: string }> {
+    return [...(this.history.get(uri.toString()) ?? [])];
+  }
 
   clear(uri: vscode.Uri): void {
     this.history.delete(uri.toString());

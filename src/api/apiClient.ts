@@ -19,10 +19,12 @@ import {
 import { createClient } from '@connectrpc/connect';
 import type { Client } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-node';
-import { AiService, FileSyncService } from '../rpc/cursor-tab_connect';
+import { AiService, FileSyncService, CursorPredictionService, CppService } from '../rpc/cursor-tab_connect';
 
 type AiClient = Client<typeof AiService>;
 type FileSyncClient = Client<typeof FileSyncService>;
+type CursorPredClient = Client<typeof CursorPredictionService>;
+type CppClient = Client<typeof CppService>;
 
 export interface ApiClientConfig {
   /** General API endpoint (HTTP/1.1) - for CppConfig, RefreshTabContext, FileSync */
@@ -39,6 +41,8 @@ export class ApiClient {
   private config: ApiClientConfig;
   private aiClient: AiClient | null = null;
   private fileSyncClient: FileSyncClient | null = null;
+  private cursorPredClient: CursorPredClient | null = null;
+  private cppClient: CppClient | null = null;
   private readonly fsClientKey: string;
   private readonly requestContextMap: WeakMap<any, { url: string; headers: Record<string, string>; body: string; timestamp: string } > = new WeakMap();
   // cursor-style streaming state
@@ -142,6 +146,8 @@ export class ApiClient {
 
     this.aiClient = createClient(AiService, transport);
     this.fileSyncClient = createClient(FileSyncService, transport);
+    this.cursorPredClient = createClient(CursorPredictionService, transport);
+    this.cppClient = createClient(CppService, transport);
   }
 
   updateConfig(newConfig: Partial<ApiClientConfig>) {
@@ -612,6 +618,36 @@ export class ApiClient {
     const { CppConfigRequest } = await import('../rpc/cursor-tab_pb.js');
     const request = new CppConfigRequest({});
     return await this.aiClient.cppConfig(request);
+  }
+
+  async cursorPredictionConfig(): Promise<any> {
+    if (!this.cursorPredClient) {
+      throw new Error('CursorPrediction client is not initialized');
+    }
+    const { CursorPredictionConfigRequest } = await import('../rpc/cursor-tab_pb.js');
+    const request = new CursorPredictionConfigRequest({});
+    return await this.cursorPredClient.cursorPredictionConfig(request);
+  }
+
+  async recordCppFate(request: any): Promise<any> {
+    if (!this.cppClient) {
+      throw new Error('Cpp client is not initialized');
+    }
+    return await this.cppClient.recordCppFate(request);
+  }
+
+  async cppAppend(request: any): Promise<any> {
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
+    }
+    return await this.aiClient.cppAppend(request);
+  }
+
+  async cppEditHistoryAppend(request: any): Promise<any> {
+    if (!this.aiClient) {
+      throw new Error('AI client is not initialized');
+    }
+    return await this.aiClient.cppEditHistoryAppend(request);
   }
 
   async uploadFile(request: FSUploadFileRequest): Promise<FSUploadFileResponse> {

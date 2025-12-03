@@ -139,17 +139,21 @@ export class CursorInlineCompletionProvider implements vscode.InlineCompletionIt
     list.enableForwardStability = true;
     
     // Proposed API: list.commands - commands shown in the inline completion widget
-    // This can be used to show feedback buttons or actions
-    list.commands = [
-      {
-        command: {
-          title: 'Accept Next Edit',
-          command: 'cometix-tab.applyNextEdit',
-          arguments: [suggestion.requestId, suggestion.bindingId],
+    // Per vscode.proposed.inlineCompletionsAdditions.d.ts:
+    // commands?: Array<Command | { command: Command; icon: ThemeIcon }>
+    // Only show "Accept Next Edit" command if there's actually a next edit available
+    if (suggestion.nextEditActionId) {
+      list.commands = [
+        {
+          command: {
+            title: 'Accept Next Edit',
+            command: 'cometix-tab.applyNextEdit',
+            arguments: [suggestion.requestId, suggestion.bindingId],
+          },
+          icon: new vscode.ThemeIcon('arrow-right'),
         },
-        icon: new vscode.ThemeIcon('arrow-right'),
-      },
-    ];
+      ];
+    }
     
     this.listRequestIds.set(list, { requestId: suggestion.requestId, bindingId: suggestion.bindingId });
     return list;

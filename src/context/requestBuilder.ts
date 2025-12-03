@@ -5,6 +5,7 @@ import {
   StreamNextCursorPredictionRequest,
   CurrentFileInfo,
   CursorPosition,
+  CursorRange,
   LinterErrors,
   StreamNextCursorPredictionRequest_FileVisibleRange,
   StreamNextCursorPredictionRequest_VisibleRange,
@@ -16,6 +17,7 @@ import {
   LspSuggestion,
   CppFileDiffHistory,
   CppParameterHint,
+  CodeResult,
 } from '../rpc/cursor-tab_pb';
 import { IDocumentTracker } from './contracts';
 import { TriggerSource, AdditionalFileInfo, LspSuggestionsContext, ParameterHintsContext } from './types';
@@ -49,6 +51,8 @@ export interface RequestContextOptions {
   readonly workspaceId?: string;
   readonly parameterHints?: ParameterHintsContext;
   readonly fileDiffHistories?: CppFileDiffHistory[];
+  /** Code results fetched via RefreshTabContext */
+  readonly codeResults?: CodeResult[];
   /** Time when the request started (performance.now() + performance.timeOrigin) */
   readonly startOfCpp?: number;
   /** Control token from persistent storage (for non-manual triggers) */
@@ -114,6 +118,7 @@ export function buildStreamRequest(
     parameterHints,
     lspSuggestedItems,
     enableMoreContext: options.enableMoreContext,
+    codeResults: options.codeResults ?? [],
     
     // Intent and control
     cppIntentInfo,
@@ -214,7 +219,7 @@ export function buildPredictionRequest(
   });
 }
 
-function buildFileInfo(options: RequestContextOptions): {
+export function buildFileInfo(options: RequestContextOptions): {
   currentFile: CurrentFileInfo;
   linterErrors?: LinterErrors;
 } {
@@ -227,6 +232,24 @@ function buildFileInfo(options: RequestContextOptions): {
     line: options.position.line,
     column: options.position.character,
   });
+
+  // Build selection range from active editor if available; fallback to cursor position
+  let selectionRange: CursorRange | undefined;
+  try {
+    const editor =
+      vscode.window.activeTextEditor?.document === options.document
+        ? vscode.window.activeTextEditor
+        : vscode.window.visibleTextEditors.find((e) => e.document === options.document);
+    const sel = editor?.selection;
+    const start = sel?.start ?? options.position;
+    const end = sel?.end ?? options.position;
+    selectionRange = new CursorRange({
+      startPosition: new CursorPosition({ line: start.line, column: start.character }),
+      endPosition: new CursorPosition({ line: end.line, column: end.character }),
+    });
+  } catch {
+    // ignore failures and leave selection undefined
+  }
   const relyOnFileSync = options.relyOnFileSync ?? false;
   const lineEnding =
     options.lineEnding ??
@@ -273,6 +296,8 @@ function buildFileInfo(options: RequestContextOptions): {
     sha256Hash,
     // Start line when content is truncated
     contentsStartAtLine,
+    // Selection (range) info
+    selection: selectionRange,
     // IMPORTANT: Cursor sends empty string for languageId
     // This is intentional - the server determines language from file extension
     languageId: '',
@@ -285,11 +310,11 @@ function buildFileInfo(options: RequestContextOptions): {
 
   return {
     currentFile,
-    linterErrors: buildLinterErrors(options.linterDiagnostics ?? []),
+    linterErrors: buildLinterErrors(options.linterDiagnostics ?? [], options.document),
   };
 }
 
-function buildLinterErrors(diagnostics: vscode.Diagnostic[]): LinterErrors | undefined {
+function buildLinterErrors(diagnostics: vscode.Diagnostic[], document?: vscode.TextDocument): LinterErrors | undefined {
   if (diagnostics.length === 0) {
     return undefined;
   }
@@ -300,8 +325,29 @@ function buildLinterErrors(diagnostics: vscode.Diagnostic[]): LinterErrors | und
       startPosition: new CursorPosition({ line: diag.range.start.line, column: diag.range.start.character }),
       endPosition: new CursorPosition({ line: diag.range.end.line, column: diag.range.end.character }),
     },
+    source: diag.source ?? undefined,
+    // Map VS Code severity to proto DiagnosticSeverity
+    severity:
+      diag.severity === vscode.DiagnosticSeverity.Error ? 1 :
+      diag.severity === vscode.DiagnosticSeverity.Warning ? 2 :
+      diag.severity === vscode.DiagnosticSeverity.Information ? 3 :
+      diag.severity === vscode.DiagnosticSeverity.Hint ? 4 : undefined,
+    relatedInformation: (diag.relatedInformation ?? []).map((ri) => ({
+      message: ri.message,
+      range: {
+        startPosition: new CursorPosition({ line: ri.location.range.start.line, column: ri.location.range.start.character }),
+        endPosition: new CursorPosition({ line: ri.location.range.end.line, column: ri.location.range.end.character }),
+      },
+    })),
   }));
-  return new LinterErrors({ errors: entries });
+
+  const rel = document ? vscode.workspace.asRelativePath(document.uri, false) : '';
+  const contents = document ? document.getText() : '';
+  return new LinterErrors({
+    relativeWorkspacePath: rel,
+    fileContents: contents,
+    errors: entries,
+  });
 }
 
 function buildFileVisibleRange(

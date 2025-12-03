@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { LineRange } from '../rpc/cursor-tab_pb';
+import { RefreshTabContextRequest } from '../rpc/cursor-tab_pb';
+import { CppFileDiffHistory } from '../rpc/cursor-tab_pb';
 import { withRetry } from './retry';
 import { buildStreamRequest } from '../context/requestBuilder';
 import {
@@ -19,6 +21,10 @@ import { CursorFeatureFlags, TriggerSource } from '../context/types';
 import { CursorPredictionController } from '../controllers/cursorPredictionController';
 import { CppHeuristicsService, CppValidationResult } from './cppHeuristics';
 import { InlineEditTriggerer } from './inlineEditTriggerer';
+import { buildFileInfo } from '../context/requestBuilder';
+import { ServerConfigService } from './serverConfigService';
+import { CursorPredictionConfigResponse, CursorPredictionConfigResponse_Heuristic, RecordCppFateRequest, CppAppendRequest, EditHistoryAppendChangesRequest } from '../rpc/cursor-tab_pb';
+import { CursorPredictionHeuristic } from './cppHeuristics';
 
 export interface SuggestionContext {
   readonly document: vscode.TextDocument;
@@ -163,6 +169,9 @@ export class CursorStateMachine implements vscode.Disposable {
   /** Model info from last successful response */
   private currentModelInfo: ModelInfo = DEFAULT_MODEL_INFO;
   
+  /** Track suggestion ranges by requestId for cursor prediction suppression (HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION) */
+  private readonly suggestionRanges = new Map<string, { uri: vscode.Uri; range: vscode.Range }>();
+  
   /** Heuristics service for validation and cursor prediction suppression */
   private readonly heuristics: CppHeuristicsService;
   
@@ -198,6 +207,9 @@ export class CursorStateMachine implements vscode.Disposable {
     
     // Initialize heuristics service
     this.heuristics = new CppHeuristicsService(logger);
+
+    // Initialize cursor prediction config (heuristics)
+    void this.initCursorPredictionConfig().catch(() => undefined);
     
     // Initialize inline edit triggerer
     this.inlineEditTriggerer = new InlineEditTriggerer(logger);
@@ -213,6 +225,20 @@ export class CursorStateMachine implements vscode.Disposable {
       this.heuristics.clearPredictionCursorMoveFlag();
     });
   }
+  private async initCursorPredictionConfig(): Promise<void> {
+    try {
+      const resp = await this.rpc.cursorPredictionConfig();
+      const enabled: CursorPredictionHeuristic[] = [];
+      if (resp.heuristics?.includes(CursorPredictionConfigResponse_Heuristic.DISABLE_IN_LAST_CPP_SUGGESTION)) {
+        enabled.push(CursorPredictionHeuristic.DISABLE_IN_LAST_CPP_SUGGESTION);
+      }
+      this.heuristics.updateConfig({ cursorPredictionHeuristics: enabled });
+      this.logger.info(`[Cpp] CursorPredictionConfig loaded (heuristics=${enabled.join(',') || 'none'})`);
+    } catch (e) {
+      this.logger.info(`[Cpp] CursorPredictionConfig not available: ${String(e)}`);
+    }
+  }
+
 
   dispose(): void {
     for (const controller of this.activeStreams.values()) {
@@ -224,6 +250,7 @@ export class CursorStateMachine implements vscode.Disposable {
     this.currentRequestByDocument.clear();
     this.supersededRequests.clear();
     this.acceptedViaCommand.clear();
+    this.suggestionRanges.clear();
     this.pendingNextAction = undefined;
     this.heuristics.dispose();
     this.inlineEditTriggerer.dispose();
@@ -425,10 +452,69 @@ export class CursorStateMachine implements vscode.Disposable {
       ? this.lspSuggestionsTracker.getRelevantSuggestions(ctx.document.uri.toString())
       : undefined;
 
+    // Build file diff histories from DocumentTracker (map to CppFileDiffHistory)
+    const relativePathForDoc = vscode.workspace.asRelativePath(ctx.document.uri, false);
+    const historyEntries = this.tracker.getHistoryWithTimestamps
+      ? this.tracker.getHistoryWithTimestamps(ctx.document.uri)
+      : this.tracker.getHistory(ctx.document.uri).map((change) => ({ timestamp: Date.now(), change }));
+
+    const fileDiffHistories: CppFileDiffHistory[] =
+      historyEntries.length > 0
+        ? [
+            new CppFileDiffHistory({
+              fileName: relativePathForDoc,
+              diffHistory: historyEntries.map((h) => h.change),
+              diffHistoryTimestamps: historyEntries.map((h) => h.timestamp),
+            }),
+          ]
+        : [];
+
     // Get configured model
     const configuredModel = vscode.workspace.getConfiguration('cometixTab').get<string>('model', 'auto');
 
     try {
+      // Optionally fetch code results via RefreshTabContext (to populate codeResults in StreamCppRequest)
+      let codeResults: any[] | undefined;
+      try {
+        const cfg = ServerConfigService.getInstance().getCachedConfig();
+        const shouldFetch = cfg?.shouldFetchRvfText === true;
+        if (shouldFetch) {
+          const { currentFile, linterErrors } = buildFileInfo({
+            document: ctx.document,
+            position: ctx.position,
+            linterDiagnostics: diagnostics,
+            visibleRanges,
+            filesyncUpdates: syncPayload.updates,
+            relyOnFileSync: syncPayload.relyOnFileSync,
+            fileVersion: ctx.document.version,
+            lineEnding: ctx.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n',
+            modelName: configuredModel,
+            workspaceId: this.workspaceStorage?.getWorkspaceId(),
+            fileDiffHistories,
+            enableMoreContext: this.flags.enableAdditionalFilesContext,
+          });
+          const rtc = new RefreshTabContextRequest({
+            currentFile,
+            modelName: configuredModel,
+            linterErrors,
+            fileDiffHistories,
+            additionalFiles,
+            clientTime: Date.now(),
+            timeSinceRequestStart: 0,
+            timeAtRequestSend: Date.now(),
+            isDebug: false,
+            workspaceId: this.workspaceStorage?.getWorkspaceId(),
+            supportsCpt: true,
+            supportsCrlfCpt: true,
+          });
+          const resp = await this.rpc.refreshTabContext(rtc);
+          codeResults = resp.codeResults ?? [];
+          this.logger.info(`[Cpp] RefreshTabContext returned ${codeResults.length} code result(s)`);
+        }
+      } catch (e) {
+        this.logger.info(`[Cpp] RefreshTabContext failed/disabled, proceeding without codeResults: ${String(e)}`);
+      }
+
       const chunks = await withRetry(
         () =>
           this.consumeStream(
@@ -453,6 +539,10 @@ export class CursorStateMachine implements vscode.Disposable {
               workspaceId: this.workspaceStorage?.getWorkspaceId(),
               storedControlToken: this.workspaceStorage?.getControlToken(),
               checkFilesyncHashPercent: this.workspaceStorage?.getCheckFilesyncHashPercent() ?? 0,
+              // Diff histories
+              fileDiffHistories,
+              // Code results from RefreshTabContext (if available)
+              codeResults,
             }),
             ctx,
             abortController,
@@ -477,7 +567,7 @@ export class CursorStateMachine implements vscode.Disposable {
           
           // Also handle followups if any
           if (rest.length) {
-            this.followups.set(requestId, { document: ctx.document.uri, queue: rest });
+            this.followups.set(docKey, { document: ctx.document.uri, queue: rest });
           }
         }
         return null;
@@ -488,7 +578,7 @@ export class CursorStateMachine implements vscode.Disposable {
       }
       const [first, ...rest] = chunks;
       if (rest.length) {
-        this.followups.set(requestId, { document: ctx.document.uri, queue: rest });
+        this.followups.set(docKey, { document: ctx.document.uri, queue: rest });
         // Register a next action for multidiff - similar to Cursor's pc() function
         // This ensures displayNextActionIfAvailable knows there are more edits
         const nextActionId = first.bindingId ?? requestId;
@@ -517,6 +607,9 @@ export class CursorStateMachine implements vscode.Disposable {
       
       // Record suggestion shown
       this.telemetryService?.recordSuggestionEvent(ctx.document, requestId, first.text);
+      
+      // Store suggestion range for cursor prediction suppression (HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION)
+      this.suggestionRanges.set(requestId, { uri: ctx.document.uri, range: first.range });
       
       return { ...first, requestId };
     } catch (error: any) {
@@ -550,7 +643,13 @@ export class CursorStateMachine implements vscode.Disposable {
     this.acceptedViaCommand.add(resolvedRequestId);
     
     // Record this acceptance for cursor prediction suppression
-    this.heuristics.recordAcceptedSuggestion(editor.document.uri, editor.selection.active);
+    // Include the suggestion range for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION
+    const suggestionInfo = this.suggestionRanges.get(resolvedRequestId);
+    this.heuristics.recordAcceptedSuggestion(
+      editor.document.uri,
+      editor.selection.active,
+      suggestionInfo?.range
+    );
     
     // Record accept telemetry
     this.telemetryService?.recordAcceptEvent(
@@ -603,7 +702,7 @@ export class CursorStateMachine implements vscode.Disposable {
     }
     
     // Fallback: check if there are follow-up edits in the queue
-    const session = this.followups.get(requestId);
+    const session = this.followups.get(editor.document.uri.toString());
     if (session && session.queue.length > 0) {
       this.logger.info(`[Cpp] displayNextActionIfAvailable: found ${session.queue.length} follow-up edits in queue, auto-triggering`);
       // Register this as a nextEdit action so the next request knows to consume from queue
@@ -731,9 +830,9 @@ export class CursorStateMachine implements vscode.Disposable {
    * Check if there are pending follow-up edits for a request
    */
   hasFollowups(requestId?: string): boolean {
-    const id = requestId ?? this.lastAcceptedRequestId;
-    if (!id) {return false;}
-    const session = this.followups.get(id);
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {return false;}
+    const session = this.followups.get(editor.document.uri.toString());
     return session !== undefined && session.queue.length > 0;
   }
 
@@ -741,9 +840,9 @@ export class CursorStateMachine implements vscode.Disposable {
    * Get the number of pending follow-up edits
    */
   getFollowupCount(requestId?: string): number {
-    const id = requestId ?? this.lastAcceptedRequestId;
-    if (!id) {return 0;}
-    const session = this.followups.get(id);
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {return 0;}
+    const session = this.followups.get(editor.document.uri.toString());
     return session?.queue.length ?? 0;
   }
 
@@ -811,6 +910,9 @@ export class CursorStateMachine implements vscode.Disposable {
         `[Cpp] Partial accept: requestId=${resolvedRequestId}, ` +
         `kind=${kindStr}, acceptedLength=${info.acceptedLength}`
       );
+
+      // Fate: PARTIAL_ACCEPT
+      this.safeRecordFate(resolvedRequestId, 'PARTIAL_ACCEPT');
     }
   }
 
@@ -847,6 +949,8 @@ export class CursorStateMachine implements vscode.Disposable {
           this.telemetryService?.recordAcceptEvent(editor.document, requestId, 0);
         }
         this.acceptedViaCommand.delete(requestId);
+        // Fate: ACCEPT
+        this.safeRecordFate(requestId, 'ACCEPT');
         this.cleanupRequest(requestId, bindingId);
         break;
         
@@ -856,6 +960,8 @@ export class CursorStateMachine implements vscode.Disposable {
         if (editor) {
           this.telemetryService?.recordRejectEvent(editor.document, requestId, 'explicit_reject');
         }
+        // Fate: REJECT
+        this.safeRecordFate(requestId, 'REJECT');
         this.cleanupRequest(requestId, bindingId);
         break;
         
@@ -868,6 +974,8 @@ export class CursorStateMachine implements vscode.Disposable {
                                (reason as any).supersededBy ? 'superseded' : 'ignored';
           this.telemetryService?.recordRejectEvent(editor.document, requestId, ignoreReason);
         }
+        // Treat ignored as reject for fate metrics
+        this.safeRecordFate(requestId, 'REJECT');
         this.cleanupRequest(requestId, bindingId);
         break;
     }
@@ -913,13 +1021,14 @@ export class CursorStateMachine implements vscode.Disposable {
     if (!targetRequestId) {
       return false;
     }
-    const session = this.followups.get(targetRequestId);
-    if (!session || session.document.toString() !== editor.document.uri.toString()) {
+    const docKey = editor.document.uri.toString();
+    const session = this.followups.get(docKey);
+    if (!session) {
       return false;
     }
     const next = session.queue.shift();
     if (!next) {
-      this.followups.delete(targetRequestId);
+      this.followups.delete(docKey);
       return false;
     }
     const targetRange = this.getApplicableRange(editor.document, next);
@@ -932,6 +1041,22 @@ export class CursorStateMachine implements vscode.Disposable {
       this.forgetBindingsForRequest(targetRequestId);
     }
     return true;
+  }
+
+  private safeRecordFate(requestId: string, fate: 'ACCEPT' | 'REJECT' | 'PARTIAL_ACCEPT'): void {
+    try {
+      const { RecordCppFateRequest, CppFate } = require('../rpc/cursor-tab_pb.js');
+      const extId = 'Haleclipse.cometix-tab';
+      const req = new RecordCppFateRequest({
+        requestId,
+        performanceNowTime: (globalThis.performance?.now?.() ?? Date.now()) as number,
+        fate: fate === 'ACCEPT' ? CppFate.ACCEPT : fate === 'REJECT' ? CppFate.REJECT : CppFate.PARTIAL_ACCEPT,
+        extension: extId,
+      });
+      void this.rpc.recordCppFate(req);
+    } catch {
+      // ignore fate errors
+    }
   }
 
   private async consumeStream(
@@ -1132,37 +1257,28 @@ export class CursorStateMachine implements vscode.Disposable {
     this.logger.info(`[Cpp] Using edit directly: server L${firstEdit.range.startLineNumber}-${firstEdit.range.endLineNumberInclusive} -> vscode L${startLine}-${endLine}, text="${suggestionText.slice(0, 50)}${suggestionText.length > 50 ? '...' : ''}"`);
     
     // Determine if this is an inline edit or a simple inline completion
-    // Use inline completion (not edit) when:
-    // 1. Single line edit on the cursor's line
-    // 2. The original text is a "subword" of the new text (i.e., we're only adding characters)
-    // This matches VS Code Copilot's isInlineSuggestion logic
-    const isMultiLine = vsRange.start.line !== vsRange.end.line;
-    const isSameLine = vsRange.start.line === ctx.position.line;
-    const isInlineSuggestion = !isMultiLine && isSameLine && this.isSubword(originalText, suggestionText);
-    const isInlineEdit = !isInlineSuggestion && originalText !== suggestionText;
+    // Use inline completion (not edit) when the suggestion meets the isInlineSuggestion criteria
+    // This matches VS Code Copilot's isInlineSuggestion logic from vscode-copilot-chat-main
+    const isInlineSuggestionResult = this.isInlineSuggestion(ctx.position, ctx.document, vsRange, suggestionText);
+    const isInlineEdit = !isInlineSuggestionResult && originalText !== suggestionText;
     
-    // CRITICAL: showRange must include the cursor position for VS Code to show the completion
-    // Extend the range to include cursor line if needed
+    // showRange determines when the suggestion can be shown based on cursor position
+    // Following vscode-copilot-chat-main's approach: use +/-4 lines padding around the edit
+    // This allows the suggestion to be shown when cursor is within 4 lines of the edit
     let showRange: vscode.Range | undefined;
     if (isInlineEdit) {
-      const cursorLine = ctx.position.line;
-      const startLine = Math.min(vsRange.start.line, cursorLine);
-      const endLine = Math.max(vsRange.end.line, cursorLine);
-      
-      // If cursor is on a different line, extend showRange to include it
-      if (startLine !== vsRange.start.line || endLine !== vsRange.end.line) {
-        const startChar = startLine === vsRange.start.line ? vsRange.start.character : 0;
-        const endChar = endLine === vsRange.end.line 
-          ? vsRange.end.character 
-          : ctx.document.lineAt(endLine).range.end.character;
-        showRange = new vscode.Range(startLine, startChar, endLine, endChar);
-        this.logger.info(`[Cpp] Extended showRange to include cursor: (${startLine},${startChar})-(${endLine},${endChar})`);
-      } else {
-        showRange = vsRange;
-      }
+      // Use +/-4 lines padding around the edit range (matching vscode-copilot-chat-main)
+      const SHOW_RANGE_PADDING_LINES = 4;
+      showRange = new vscode.Range(
+        Math.max(vsRange.start.line - SHOW_RANGE_PADDING_LINES, 0),
+        0,
+        vsRange.end.line + SHOW_RANGE_PADDING_LINES,
+        Number.MAX_SAFE_INTEGER
+      );
+      this.logger.info(`[Cpp] Set showRange with +/-${SHOW_RANGE_PADDING_LINES} lines padding: (${showRange.start.line},${showRange.start.character})-(${showRange.end.line},${showRange.end.character})`);
     }
     
-    this.logger.info(`[Cpp] isInlineSuggestion=${isInlineSuggestion}, isInlineEdit=${isInlineEdit}, original="${originalText}", text="${suggestionText}"`);
+    this.logger.info(`[Cpp] isInlineSuggestion=${isInlineSuggestionResult}, isInlineEdit=${isInlineEdit}, original="${originalText}", text="${suggestionText}"`);
     
     // If there's a next edit, add displayLocation to show "Next edit available" label
     let finalDisplayLocation = displayLocation;
@@ -1578,10 +1694,63 @@ export class CursorStateMachine implements vscode.Disposable {
   }
 
   /**
+   * Determine if a suggestion should be shown as an inline suggestion (ghost text)
+   * rather than an inline edit (diff view).
+   * 
+   * Ported from vscode-copilot-chat-main's isInlineSuggestion.ts
+   * 
+   * An inline suggestion is used when:
+   * 1. Multi-line insertion starts on the next line with all new lines being newly created
+   * 2. Single-line edit on the cursor's line where original text is a subword of new text
+   */
+  private isInlineSuggestion(
+    cursorPos: vscode.Position,
+    document: vscode.TextDocument,
+    range: vscode.Range,
+    newText: string
+  ): boolean {
+    // Case 1: Multi-line insertion starts on the next line
+    // All new lines have to be newly created lines
+    if (
+      range.isEmpty &&
+      cursorPos.line + 1 === range.start.line &&
+      range.start.character === 0 &&
+      document.lineAt(cursorPos.line).text.length === cursorPos.character && // cursor is at end of line
+      newText.endsWith('\n') // next line should not have content
+    ) {
+      return true;
+    }
+
+    // Must be single-line edit on cursor's line
+    if (range.start.line !== range.end.line || range.start.line !== cursorPos.line) {
+      return false;
+    }
+
+    const cursorOffset = document.offsetAt(cursorPos);
+    const rangeStartOffset = document.offsetAt(range.start);
+    const rangeEndOffset = document.offsetAt(range.end);
+
+    const replacedText = document.getText(range);
+
+    const cursorOffsetInReplacedText = cursorOffset - rangeStartOffset;
+    if (cursorOffsetInReplacedText < 0) {
+      return false;
+    }
+
+    // Text before cursor must be equal between original and new text
+    const textBeforeCursorIsEqual =
+      replacedText.substring(0, cursorOffsetInReplacedText) ===
+      newText.substring(0, cursorOffsetInReplacedText);
+    if (!textBeforeCursorIsEqual) {
+      return false;
+    }
+
+    return this.isSubword(replacedText, newText);
+  }
+
+  /**
    * Check if string `a` is a subword of string `b`.
    * A is a subword of B if A can be obtained by removing characters from B.
-   * This is used to determine if a completion is a simple insertion (inline suggestion)
-   * vs a replacement (inline edit).
    * 
    * Examples:
    * - isSubword("    }", "    });") = true (remove ");" to get "    }")
@@ -1589,16 +1758,13 @@ export class CursorStateMachine implements vscode.Disposable {
    * - isSubword("foo", "bar") = false
    */
   private isSubword(a: string, b: string): boolean {
-    let aIdx = 0;
-    let bIdx = 0;
-    while (aIdx < a.length) {
+    for (let aIdx = 0, bIdx = 0; aIdx < a.length; bIdx++) {
       if (bIdx >= b.length) {
         return false;
       }
       if (a[aIdx] === b[bIdx]) {
         aIdx++;
       }
-      bIdx++;
     }
     return true;
   }
@@ -1655,7 +1821,8 @@ export class CursorStateMachine implements vscode.Disposable {
   }
 
   private cleanupIfFinished(requestId: string, bindingId?: string): void {
-    const session = this.followups.get(requestId);
+    const editor = vscode.window.activeTextEditor;
+    const session = editor ? this.followups.get(editor.document.uri.toString()) : undefined;
     if (session && session.queue.length > 0) {
       return;
     }
@@ -1663,9 +1830,14 @@ export class CursorStateMachine implements vscode.Disposable {
   }
 
   private cleanupRequest(requestId: string, bindingId?: string): void {
-    this.followups.delete(requestId);
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+      this.followups.delete(editor.document.uri.toString());
+    }
     // Clean up next action cache entries for this request
     this.nextActionCache.delete(requestId);
+    // Clean up suggestion range tracking
+    this.suggestionRanges.delete(requestId);
     if (bindingId) {
       this.bindingCache.delete(bindingId);
       this.nextActionCache.delete(bindingId);

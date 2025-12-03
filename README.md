@@ -3,7 +3,26 @@
 [![VS Code](https://img.shields.io/badge/VS%20Code-1.103.1+-blue.svg)](https://code.visualstudio.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-blue.svg)](https://www.typescriptlang.org/)
 
+## Disclaimer
 Cometix Tab 是一个 VS Code 扩展，将 Cursor 编辑器的智能代码补全功能带入 VS Code。通过调用 Cursor 的后端 API，为您提供强大的 AI 辅助编程体验。
+
+YOU ARE NOT ALLOWED TO USE THIS PLUGIN FOR COMMERCIAL PURPOSES, AND YOU ARE NOT ALLOWED TO DISTRIBUTE THIS PLUGIN WITHOUT PERMISSION (including but not limited to plugin, code， document, etc.).
+禁止使用本插件用于商业目的，禁止未经授权的传播（包括但不限于插件、代码、文档等）。
+
+The purpose of this project is to explore and learn from Cursor Tab, and to reverse-engineer the interface and code of Cursor. Please respect Anysphere and hope Cursor can provide an official vscode plugin someday.
+本项目仅为对Cursor Tab的探索与学习，出于针对Cursor的接口与代码的逆向，请其他使用者和研究者保持对Anysphere的尊重。希望Cursor有朝一日能提供官方的vscode插件。
+
+This is an experimental version, built with mostly vibe coding, highly unreliable, please report any bugs and use at your own risk!
+
+The purpose of current experimental project is to investigate how to implement more Cursor-like completion features and mechanics in vscode.
+
+This plugin may modify part of vscode files (if you agree with these modification), thus use with caution!
+
+这是一个实验版本，主要使用vibe coding编写，不太可靠，此外有比较多的日志输出，请尽可能报告相关的bug并自担责任！
+
+本实验项目目的在于探索更接近Cursor Tab的功能和机制的vscode插件。
+
+本插件可能修改部分vscode本体文件（如果你同意相关修改），请小心使用。
 
 ## 功能特性
 
@@ -207,8 +226,10 @@ pnpm run package
 
 ## 许可证
 
-MIT
+AGPL-3.0， 适用于从本项目初始commit开始的所有代码，即使当时尚未将LICENSE文件添加
 
 ## 致谢
+
+本项目是自Cometix Tab项目基础上进行的实验性探索，感觉Cursor, Codex, Windsurf在vibe coding上基于的帮助。感谢Anysphere的Cursor中Cursor Tab相关的实现。
 
 ~~本项目基于对 Haleclipse 的开发~~（逃），感谢 Cometix Space 的大家支持

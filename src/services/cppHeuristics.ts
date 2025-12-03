@@ -15,6 +15,15 @@ export enum CppHeuristicType {
 }
 
 /**
+ * Cursor Prediction Heuristics from CursorPredictionConfigResponse
+ * These can be enabled/disabled via server config
+ */
+export enum CursorPredictionHeuristic {
+  /** Disable prediction when cursor is in the last CPP suggestion range */
+  DISABLE_IN_LAST_CPP_SUGGESTION = 'disable_in_last_cpp_suggestion',
+}
+
+/**
  * Result of isValidCppCase check
  */
 export interface CppValidationResult {
@@ -65,15 +74,6 @@ export interface AcceptedSuggestionInfo {
   readonly timestamp: number;
   /** The range of the accepted suggestion (for HEURISTIC_DISABLE_IN_LAST_CPP_SUGGESTION) */
   readonly range?: vscode.Range;
-}
-
-/**
- * Cursor Prediction Heuristics from CursorPredictionConfigResponse
- * These can be enabled/disabled via server config
- */
-export enum CursorPredictionHeuristic {
-  /** Disable prediction when cursor is in the last CPP suggestion range */
-  DISABLE_IN_LAST_CPP_SUGGESTION = 'disable_in_last_cpp_suggestion',
 }
 
 /**

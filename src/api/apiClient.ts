@@ -116,7 +116,6 @@ export class ApiClient {
           req.header.set('x-cursor-client-version', '1.5.5');
           req.header.set('x-fs-client-key', this.fsClientKey);
           
-          // 濞ｈ�濮炴潻鍊熼嚋婢舵挳鍎?
           const rid = cryptoRandomUUIDSafe();
           req.header.set('x-request-id', rid);
           req.header.set('x-amzn-trace-id', `Root=${rid}`);
@@ -125,12 +124,10 @@ export class ApiClient {
             req.header.set('x-cursor-timezone', tz);
           } catch { }
 
-          // 閺冦儱绻旂拋鏉跨秿
           await this.logConnectRequest(req);
           
           try {
             const result = await next(req);
-            // 濞翠礁绱￠崫宥呯安閿涙艾瀵樼憗鍛�簰鐠佹澘缍嶅В蹇庨嚋閸掑棛澧?
             if (isAsyncIterable(result)) {
               return this.wrapStreamingResponseWithLogging(req, result);
             }
@@ -191,7 +188,6 @@ export class ApiClient {
     return headers;
   }
 
-  // Fetch 鐠囬攱鐪版稉濠佺瑓閺傚浄绱欓悽銊ょ艾闁挎瑨顕ら弮鎯扮翻閸戠尨绱?
   private lastFetchContext: {
     kind: string;
     url: string;
@@ -216,7 +212,6 @@ export class ApiClient {
         safeHeaders['x-cursor-checksum'] = mask(safeHeaders['x-cursor-checksum']);
       }
 
-      // 閻㈢喐鍨氱拠閿嬬湴娴ｆ挸鐡х粭锔胯�
       let bodyStr = '<none>';
       
       if (body !== null && body !== undefined) {
@@ -265,7 +260,6 @@ export class ApiClient {
         }
       }
 
-      // 娣囨繂鐡ㄧ拠閿嬬湴娑撳﹣绗呴弬鍥︾返闁挎瑨顕ら弮鏈靛▏??
       this.lastFetchContext = {
         kind,
         url,
@@ -289,33 +283,28 @@ export class ApiClient {
     try {
       const ts = new Date().toISOString();
       
-      // 閹存劕濮涢崫宥呯安閸欘亣绶�崙铏圭暆鐟曚椒淇??
       if (status >= 200 && status < 300) {
         this.channel?.appendLine(`[${ts}] ??${kind} ??${status}`);
         this.lastFetchContext = null;
         return;
       }
       
-      // 闁挎瑨顕ら崫宥呯安鏉堟挸鍤�€瑰本鏆ｆ穱鈩冧紖
       this.channel?.appendLine('');
       this.channel?.appendLine(`[${ts}] ??${kind} FAILED`);
       this.channel?.appendLine(`[${ts}] Response Status: ${status}`);
       
-      // 鏉堟挸鍤�€瑰本鏆ｉ惃鍕�嚞濮瑰倷淇??
       if (this.lastFetchContext) {
         this.channel?.appendLine(`[${ts}] Request URL: ${this.lastFetchContext.url}`);
         this.channel?.appendLine(`[${ts}] Request Headers: ${JSON.stringify(this.lastFetchContext.headers)}`);
         this.channel?.appendLine(`[${ts}] Request Body: ${this.lastFetchContext.body}`);
       }
       
-      // 鏉堟挸鍤�崫宥呯安??
       const responseHeaders: Record<string, string> = {};
       headers.forEach((value, key) => {
         responseHeaders[key] = value;
       });
       this.channel?.appendLine(`[${ts}] Response Headers: ${JSON.stringify(responseHeaders)}`);
 
-      // 鏉堟挸鍤�崫宥呯安娴ｆ搫绱欐俊鍌涚亯閺堝�绱?
       if (body !== null && body !== undefined) {
         if ((body instanceof Uint8Array || ArrayBuffer.isView(body)) && isProto) {
           const bytes = body as Uint8Array;
@@ -695,19 +684,16 @@ export class ApiClient {
     timestamp: string;
   } | null = null;
 
-  // Connect RPC 鐠囬攱鐪伴弮銉ョ箶閿涘牅绮庢穱婵嗙摠娑撳﹣绗呴弬鍥风礉娑撳秶鐝涢崡瀹犵翻閸戠尨绱?
   private async logConnectRequest(req: any) {
     try {
       const ts = new Date().toISOString();
       const url = req.url || 'unknown';
       
-      // 閺€鍫曟肠婢舵挳鍎?
       const headers: Record<string, string> = {};
       req.header.forEach((value: string, key: string) => {
         headers[key] = value;
       });
 
-      // 閹衡晝鐖滈弫蹇斿妳娣団剝浼?
       const safeHeaders = { ...headers };
       const mask = (v: string) => (typeof v === 'string' && v.length > 12) ? `${v.slice(0, 6)}...${v.slice(-4)}` : '***';
       if (safeHeaders['authorization']) {
@@ -717,7 +703,6 @@ export class ApiClient {
         safeHeaders['x-cursor-checksum'] = mask(safeHeaders['x-cursor-checksum']);
       }
 
-      // 鐠佹澘缍嶇拠閿嬬湴??
       let bodyStr = '<none>';
       if (req.message) {
         try {
@@ -727,7 +712,6 @@ export class ApiClient {
         }
       }
 
-      // 娣囨繂鐡ㄧ拠閿嬬湴娑撳﹣绗呴弬鍥风礄閹稿�顕�Ч鍌濈�闊�亷绱?
       this.requestContextMap.set(req, {
         url,
         headers: safeHeaders,
@@ -735,11 +719,9 @@ export class ApiClient {
         timestamp: ts,
       });
     } catch {
-      // 閺冦儱绻旂拋鏉跨秿婢惰精瑙︽稉宥呯安瑜板崬鎼风拠閿嬬湴
     }
   }
 
-  // Connect RPC 閸濆秴绨查弮銉ョ箶閿涘牊鍨氶崝鐔告�鏉堟挸鍤�拠锔剧矎娑撳﹣绗呴弬鍥风礆
   private async logConnectResponse(req: any, res: any) {
     try {
       const ts = new Date().toISOString();
@@ -761,15 +743,11 @@ export class ApiClient {
       }
       this.channel?.appendLine(`[${ts}]   Response Body (proto->json): ${responseBody}`);
 
-      // 濞撳懘娅庣拠閿嬬湴娑撳﹣绗呴弬?
       this.requestContextMap.delete(req);
     } catch {
-      // 閺冦儱绻旂拋鏉跨秿婢惰精瑙︽稉宥呯安瑜板崬鎼烽崫宥呯安
     }
   }
 
-  // Connect RPC 濞翠礁绱￠崫宥呯安閺冦儱绻旈敍鍫濐嚠濮ｅ繋閲滈崚鍡欏�鏉堟挸鍤�敍?
-    // Connect RPC streaming logging (per chunk)
   private wrapStreamingResponseWithLogging<T>(req: any, source: AsyncIterable<T>): AsyncIterable<T> {
     const url = req.url || 'unknown';
     const method = url.split('/').pop() || 'unknown';

@@ -29,9 +29,20 @@ import { StatusBarPicker } from './ui/statusBarPicker';
 import { showSnoozePicker } from './ui/menuPanel';
 import { SnoozeService } from './services/snoozeService';
 import { ServerConfigService } from './services/serverConfigService';
-import { checkAndPromptProposedApiOnStartup, resetIgnoreProposalCheck } from './services/productJsonPatcher';
+import { ensureProposedApiEnabled, resetIgnoreProposalCheck, checkAndPromptProposedApiOnStartup } from './services/productJsonPatcher';
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
+	// ========== 最优先：检查 Proposed API 是否可用 ==========
+	// 必须在任何使用 proposed API 的代码之前执行
+	const extensionId = 'Haleclipse.cometix-tab';
+	const requiredProposals = ['inlineCompletionsAdditions'];
+	
+	const canActivate = await ensureProposedApiEnabled(context, extensionId, requiredProposals);
+	if (!canActivate) {
+		// 用户选择稍后提醒或修改 product.json 后会重启，停止激活
+		return;
+	}
+	// ========== Proposed API 检查完成 ==========
 	const container = new ServiceContainer(context);
 
 	container.registerSingleton('logger', () => new Logger());
@@ -250,11 +261,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
-	// Check and prompt for proposed API on startup (non-blocking)
-	// Extension ID format: publisher.name
-	const extensionId = 'Haleclipse.cometix-tab';
-	const requiredProposals = ['inlineCompletionsAdditions'];
-	checkAndPromptProposedApiOnStartup(context, extensionId, requiredProposals, logger);
+	// Note: Proposed API check already done at the start of activate()
 
 	logger.info('Cometix Tab extension activated');
 }

@@ -319,17 +319,16 @@ export async function checkAndPromptProposedApiOnStartup(
 }
 
 /**
- * 显示重启提示（用户模式重启）
+ * 显示重启提示
  */
 async function showRestartPrompt(message: string): Promise<void> {
-  const restart = await vscode.window.showInformationMessage(
-    `✅ ${message}\n\n⚠️ 需要重启 VS Code 才能使 Proposed API 生效。`,
-    '立即重启',
-    '稍后重启'
+  const selection = await vscode.window.showInformationMessage(
+    `✅ ${message}\n\n需要重新加载窗口才能使更改生效。`,
+    '立即重新加载',
+    '稍后'
   );
 
-  if (restart === '立即重启') {
-    // 使用 reloadWindow 命令重启（用户模式）
+  if (selection === '立即重新加载') {
     await vscode.commands.executeCommand('workbench.action.reloadWindow');
   }
 }
@@ -339,4 +338,114 @@ async function showRestartPrompt(message: string): Promise<void> {
  */
 export async function resetIgnoreProposalCheck(context: vscode.ExtensionContext): Promise<void> {
   await context.globalState.update(IGNORE_PROPOSAL_CHECK_KEY, false);
+}
+
+/**
+ * 在激活函数最开头调用的检查函数
+ * 返回 true 表示可以继续激活，false 表示应该停止激活
+ */
+export async function ensureProposedApiEnabled(
+  context: vscode.ExtensionContext,
+  extensionId: string,
+  proposals: string[],
+  logger?: ILogger
+): Promise<boolean> {
+  const log = (msg: string) => logger?.info(msg) ?? console.log(msg);
+  const logWarn = (msg: string) => logger?.warn(msg) ?? console.warn(msg);
+  const logError = (msg: string, err?: unknown) => logger?.error(msg, err) ?? console.error(msg, err);
+
+  log('[ProductJsonPatcher] 启动时检查 proposed API 状态（前置检查）');
+
+  // 检查用户是否已选择忽略
+  const ignoreCheck = context.globalState.get<boolean>(IGNORE_PROPOSAL_CHECK_KEY, false);
+  if (ignoreCheck) {
+    log('[ProductJsonPatcher] 用户已选择忽略 API 提案检查，尝试继续激活');
+    return true;
+  }
+
+  // 检查是否已经启用
+  const check = await checkApiProposals(extensionId, proposals);
+  if (check.ok) {
+    log('[ProductJsonPatcher] Proposed API 已在 product.json 中启用');
+    return true;
+  }
+
+  logWarn(`[ProductJsonPatcher] Proposed API 未启用: ${check.reason}`);
+
+  // 显示提示
+  const selection = await vscode.window.showWarningMessage(
+    '🚀 Cometix Tab 需要启用 VS Code Proposed API 才能正常工作。\n\n需要修改 VS Code 的 product.json 文件以启用 inlineCompletionsAdditions API。',
+    '启用（需要管理员权限）',
+    '稍后提醒',
+    '不再提示'
+  );
+
+  if (selection === '不再提示') {
+    await context.globalState.update(IGNORE_PROPOSAL_CHECK_KEY, true);
+    log('[ProductJsonPatcher] 用户选择不再提示，扩展将尝试继续激活（可能失败）');
+    return true; // 让扩展尝试激活，可能会失败但用户选择了忽略
+  }
+
+  if (selection === '稍后提醒') {
+    log('[ProductJsonPatcher] 用户选择稍后提醒，扩展将停止激活');
+    vscode.window.showInformationMessage('Cometix Tab 未激活。请稍后通过命令面板运行 "Cometix Tab: Enable Proposed API" 来启用。');
+    return false;
+  }
+
+  if (selection !== '启用（需要管理员权限）') {
+    log('[ProductJsonPatcher] 用户取消了对话框，扩展将停止激活');
+    return false;
+  }
+
+  // 用户选择启用
+  log('[ProductJsonPatcher] 用户选择启用，开始修改流程');
+
+  let success = false;
+
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: '正在启用 Proposed API...',
+    cancellable: false
+  }, async (progress) => {
+    // 先尝试普通权限
+    progress.report({ message: '尝试修改 product.json...' });
+    
+    // 创建临时 logger（满足 ILogger 接口）
+    const tempLogger: ILogger = {
+      info: log,
+      warn: logWarn,
+      error: logError,
+      dispose: () => {}
+    };
+    
+    const normalResult = await tryNormalPatch(extensionId, proposals, tempLogger);
+    
+    if (normalResult.success) {
+      log('[ProductJsonPatcher] 普通权限修改成功');
+      success = true;
+      await showRestartPrompt(normalResult.message);
+      return;
+    }
+
+    // 如果是权限错误，尝试提升权限
+    if (isPermissionError(normalResult.error)) {
+      progress.report({ message: '请在系统对话框中确认管理员权限...' });
+      const elevatedResult = await tryElevatedPatch(extensionId, proposals, tempLogger);
+      
+      if (elevatedResult.success) {
+        log('[ProductJsonPatcher] 权限提升修改成功');
+        success = true;
+        await showRestartPrompt(elevatedResult.message);
+      } else {
+        logError('[ProductJsonPatcher] 权限提升修改失败');
+        vscode.window.showErrorMessage(`❌ ${elevatedResult.message}`);
+      }
+    } else {
+      vscode.window.showErrorMessage(`❌ ${normalResult.message}`);
+    }
+  });
+
+  // 如果修改成功，会触发重启，返回 false 阻止继续激活
+  // 如果修改失败，也返回 false
+  return false;
 }

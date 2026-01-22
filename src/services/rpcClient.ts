@@ -23,37 +23,33 @@ import { ILogger, IRpcClient } from '../context/contracts';
 import { EndpointManager } from './endpointManager';
 
 export class RpcClient implements vscode.Disposable, IRpcClient {
+  private static readonly REFRESH_DEBOUNCE_MS = 300;
+
   private client: ApiClient;
   private readonly disposables: vscode.Disposable[] = [];
-  private endpointManager: EndpointManager | undefined;
+  private refreshTimer: NodeJS.Timeout | undefined;
 
-  constructor(private readonly logger: ILogger) {
+  constructor(
+    private readonly logger: ILogger,
+    private readonly endpointManager: EndpointManager
+  ) {
     this.client = this.createClient();
     this.disposables.push(
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration('cometixTab')) {
-          this.logger.info('Configuration changed, refreshing Cursor client');
-          this.client = this.createClient();
+        if (
+          event.affectsConfiguration('cometixTab.authToken') ||
+          event.affectsConfiguration('cometixTab.clientKey')
+        ) {
+          this.scheduleRefresh('configuration changed');
         }
       })
     );
-  }
 
-  /**
-   * Set the EndpointManager instance for endpoint resolution
-   * This should be called after construction to inject the dependency
-   */
-  setEndpointManager(manager: EndpointManager): void {
-    this.endpointManager = manager;
-    // Subscribe to endpoint changes
     this.disposables.push(
-      manager.onEndpointChanged(() => {
-        this.logger.info('Endpoint changed, refreshing Cursor client');
-        this.client = this.createClient();
-      })
+      this.endpointManager.onEndpointChanged((resolved) => {
+        this.scheduleRefresh(`endpoint changed (mode=${resolved.mode})`);
+      }),
     );
-    // Recreate client with proper endpoints
-    this.client = this.createClient();
   }
 
   async streamCpp(
@@ -144,6 +140,10 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
 
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
   }
 
   /**
@@ -151,8 +151,7 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
    * Called when endpoint settings change
    */
   refreshClient(): void {
-    this.logger.info('Refreshing Cursor RPC client due to configuration change');
-    this.client = this.createClient();
+    this.scheduleRefresh('manual refresh');
   }
 
   private createClient(): ApiClient {
@@ -160,18 +159,12 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
     const authToken = config.get<string>('authToken') ?? '';
     const clientKey = config.get<string>('clientKey') ?? '';
 
-    // Get endpoints from EndpointManager if available
-    let baseUrl: string | undefined;
-    let geoCppUrl: string | undefined;
-    
-    if (this.endpointManager) {
-      const resolved = this.endpointManager.resolveEndpoint();
-      baseUrl = resolved.baseUrl;
-      geoCppUrl = resolved.geoCppUrl;
-      this.logger.info(`Initialising Cursor RPC client: mode=${resolved.mode}, baseUrl=${baseUrl}, geoCppUrl=${geoCppUrl}`);
-    } else {
-      this.logger.info('Initialising Cursor RPC client without EndpointManager (using defaults)');
-    }
+    const resolved = this.endpointManager.resolveEndpoint();
+    const baseUrl = resolved.baseUrl;
+    const geoCppUrl = resolved.geoCppUrl;
+    this.logger.info(
+      `Initialising Cursor RPC client: mode=${resolved.mode}, baseUrl=${baseUrl}, geoCppUrl=${geoCppUrl}`
+    );
 
     const finalConfig: Partial<ApiClientConfig> = {
       baseUrl,
@@ -181,6 +174,17 @@ export class RpcClient implements vscode.Disposable, IRpcClient {
     };
 
     return new ApiClient(finalConfig);
+  }
+
+  private scheduleRefresh(reason: string): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+    }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      this.logger.info(`Refreshing Cursor RPC client (${reason})`);
+      this.client = this.createClient();
+    }, RpcClient.REFRESH_DEBOUNCE_MS);
   }
 
   private stringifyPayload(value: unknown): string {

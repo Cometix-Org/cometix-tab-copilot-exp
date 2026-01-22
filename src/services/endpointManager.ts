@@ -85,12 +85,14 @@ export interface ResolvedEndpoint {
 export class EndpointManager implements vscode.Disposable {
   private static readonly CONFIG_SECTION = 'cometixTab';
   private static readonly STORAGE_KEY_AUTO_ENDPOINT = 'autoDetectedGeoCppUrl';
+  private static readonly CONFIG_DEBOUNCE_MS = 300;
 
   private readonly _onEndpointChanged = new vscode.EventEmitter<ResolvedEndpoint>();
   public readonly onEndpointChanged = this._onEndpointChanged.event;
 
   private disposables: vscode.Disposable[] = [];
   private globalState: vscode.Memento;
+  private notifyTimer: NodeJS.Timeout | undefined;
 
   // Cached auto-detected endpoint from server
   private cachedAutoEndpoint: string | undefined;
@@ -109,7 +111,7 @@ export class EndpointManager implements vscode.Disposable {
           e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.officialRegion`) ||
           e.affectsConfiguration(`${EndpointManager.CONFIG_SECTION}.customEndpoint`)
         ) {
-          this.notifyEndpointChanged();
+          this.scheduleNotifyEndpointChanged();
         }
       })
     );
@@ -118,6 +120,10 @@ export class EndpointManager implements vscode.Disposable {
   dispose(): void {
     this.disposables.forEach((d) => d.dispose());
     this._onEndpointChanged.dispose();
+    if (this.notifyTimer) {
+      clearTimeout(this.notifyTimer);
+      this.notifyTimer = undefined;
+    }
   }
 
   /**
@@ -356,6 +362,16 @@ export class EndpointManager implements vscode.Disposable {
   private notifyEndpointChanged(): void {
     const resolved = this.resolveEndpoint();
     this._onEndpointChanged.fire(resolved);
+  }
+
+  private scheduleNotifyEndpointChanged(): void {
+    if (this.notifyTimer) {
+      clearTimeout(this.notifyTimer);
+    }
+    this.notifyTimer = setTimeout(() => {
+      this.notifyTimer = undefined;
+      this.notifyEndpointChanged();
+    }, EndpointManager.CONFIG_DEBOUNCE_MS);
   }
 
   private log(message: string): void {

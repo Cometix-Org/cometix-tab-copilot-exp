@@ -47,7 +47,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	container.registerSingleton('logger', () => new Logger());
 	container.registerSingleton('tracker', () => new DocumentTracker());
-	container.registerSingleton('rpcClient', (c) => new RpcClient(c.resolve('logger')));
+	container.registerSingleton('endpointManager', () => new EndpointManager(context));
+	container.registerSingleton('rpcClient', (c) => new RpcClient(c.resolve('logger'), c.resolve('endpointManager')));
 	container.registerSingleton('config', () => new ConfigService());
 	container.registerSingleton('fileSyncUpdates', (c) => new FilesyncUpdatesStore(c.resolve('logger')));
 	container.registerSingleton('fileSync', (c) => new FileSyncCoordinator(
@@ -124,13 +125,8 @@ export async function activate(context: vscode.ExtensionContext) {
 	registerNextEditCommand(stateMachine, logger, context.subscriptions);
 	registerCursorPredictionCommand(logger, context.subscriptions);
 
-	// Endpoint manager for API endpoint selection
-	const endpointManager = new EndpointManager(context);
-	context.subscriptions.push(endpointManager);
-
-	// Get RpcClient and wire up EndpointManager
+	const endpointManager = container.resolve<EndpointManager>('endpointManager');
 	const rpcClient = container.resolve<RpcClient>('rpcClient');
-	rpcClient.setEndpointManager(endpointManager);
 	
 	// Register endpoint commands
 	const endpointCommandDisposables = registerEndpointCommands(

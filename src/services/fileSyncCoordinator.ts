@@ -196,7 +196,22 @@ export class FileSyncCoordinator implements vscode.Disposable, IFileSyncCoordina
   }
 
   private isTrackableDocument(document: vscode.TextDocument): boolean {
-    return document.uri.scheme === 'file';
+    if (document.uri.scheme !== 'file') {
+      return false;
+    }
+
+    const fsPath = document.uri.fsPath;
+    // Never sync VS Code server/user configuration files (may contain secrets).
+    if (fsPath.includes('/.vscode-server/') || fsPath.includes('/.vscode/')) {
+      return false;
+    }
+
+    // If a workspace is open, only sync files inside workspace folders.
+    if (vscode.workspace.workspaceFolders?.length) {
+      return vscode.workspace.getWorkspaceFolder(document.uri) !== undefined;
+    }
+
+    return true;
   }
 
   private onDocumentChanged(event: vscode.TextDocumentChangeEvent): void {
